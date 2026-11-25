@@ -84,20 +84,21 @@ internal sealed record Shortcut(int Key, Modifiers Modifiers)
 internal enum LanguagePreference { System, Russian, English }
 
 internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse = true, bool WakeByKeyboard = true,
-    LanguagePreference Language = LanguagePreference.System, bool CloseToTray = true)
+    LanguagePreference Language = LanguagePreference.System, bool CloseToTray = true, bool StartInTray = false,
+    bool AutoUpdate = false)
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "DisplayRest";
-    private static readonly string SettingsFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DisplayRest", "settings.json");
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    internal static readonly string Folder = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DisplayRest");
+    private static readonly string SettingsFile = Path.Combine(Folder, "settings.json");
 
     internal static UserSettings Load()
     {
         if (!File.Exists(SettingsFile))
             return new();
 
-        var settings = JsonSerializer.Deserialize<UserSettings>(File.ReadAllText(SettingsFile)) ??
+        var settings = JsonSerializer.Deserialize(File.ReadAllText(SettingsFile), SettingsJson.Default.UserSettings) ??
             throw new InvalidDataException("Файл параметров пуст.");
         if (settings.Shortcut is { IsValid: false } ||
             (settings.Shortcut is null && !settings.WakeByMouse && !settings.WakeByKeyboard))
@@ -111,7 +112,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
         var tempPath = SettingsFile + ".tmp";
         try
         {
-            File.WriteAllText(tempPath, JsonSerializer.Serialize(this, JsonOptions));
+            File.WriteAllText(tempPath, JsonSerializer.Serialize(this, SettingsJson.Default.UserSettings));
             File.Move(tempPath, SettingsFile, overwrite: true);
         }
         finally
@@ -137,3 +138,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
             key.DeleteValue(RunValue, throwOnMissingValue: false);
     }
 }
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(UserSettings))]
+internal partial class SettingsJson : JsonSerializerContext;

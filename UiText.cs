@@ -1,38 +1,25 @@
 using System;
 using System.Globalization;
-using System.Windows;
 
 namespace DisplayRest;
 
-internal static class UiText
+internal static partial class UiText
 {
-    private static ResourceDictionary? _strings;
-    internal static string LanguageTag { get; private set; } = "";
+    private static bool _russian;
 
     internal static void Use(LanguagePreference preference)
     {
-        var tag = preference switch
+        _russian = preference switch
         {
-            LanguagePreference.Russian => "ru",
-            LanguagePreference.English => "en",
-            _ => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru" ? "ru" : "en"
+            LanguagePreference.Russian => true,
+            LanguagePreference.English => false,
+            _ => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru"
         };
-        if (tag == LanguageTag)
-            return;
-
-        var strings = new ResourceDictionary { Source = new Uri($"Strings.{tag}.xaml", UriKind.Relative) };
-        var merged = Application.Current.Resources.MergedDictionaries;
-        if (_strings is null)
-            merged.Add(strings);
-        else
-            merged[merged.IndexOf(_strings)] = strings;
-        _strings = strings;
-        LanguageTag = tag;
     }
 
     internal static string Get(string key, object? value = null)
     {
-        var text = (string)_strings![key];
-        return value is null ? text : string.Format(CultureInfo.GetCultureInfo(LanguageTag), text, value);
+        var text = (_russian ? RU(key) : EN(key)) ?? key;
+        return value is null ? text : string.Format(CultureInfo.CurrentCulture, text, value);
     }
 }

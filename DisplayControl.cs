@@ -1,27 +1,30 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Interop;
-using System.Windows.Threading;
 using static DisplayRest.WindowsNative;
 
 namespace DisplayRest;
 
 internal sealed class DisplayControl : IDisposable
 {
-    private readonly Dispatcher _ui = Dispatcher.CurrentDispatcher;
+    private const int RunAction = AppMessage + 1;
+    private const int StopThread = AppMessage + 2;
+    private const int WakeDisplays = AppMessage + 3;
+    private const int SleepAgain = AppMessage + 4;
+    private readonly Action<Action> _postToUi;
+    private readonly ConcurrentQueue<Action> _actions = new();
     private readonly Thread _thread;
-    private readonly Dispatcher _dispatcher;
     private readonly Dictionary<int, bool> _forwardedKeys = new();
     private readonly HashSet<int> _modifiers = new();
     private readonly HashSet<int> _blockedButtons = new();
     private readonly InputHook _keyboardHook;
     private readonly InputHook _mouseHook;
-    private HwndSource _window = null!;
-    private DispatcherTimer _sleepDelay = null!;
+    private nint _window;
+    private bool _sleepPending;
     private UserSettings _settings;
     private nint _captureWindow;
     private bool _modifierOnly;
@@ -36,42 +39,42 @@ internal sealed class DisplayControl : IDisposable
     internal event Action<Shortcut>? ShortcutCaptured;
     internal event Action<bool>? DisplayChanged;
 
-    internal DisplayControl(UserSettings settings)
+    internal DisplayControl(UserSettings settings, Action<Action> postToUi)
     {
         _settings = settings;
+        _postToUi = postToUi;
         _keyboardHook = KeyboardInput;
         _mouseHook = MouseInput;
-        var started = new TaskCompletionSource<Dispatcher>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _thread = new Thread(() => Run(started)) { IsBackground = true, Name = "DisplayRest input" };
         _thread.SetApartmentState(ApartmentState.STA);
         _thread.Start();
-        _dispatcher = started.Task.GetAwaiter().GetResult();
+        started.Task.GetAwaiter().GetResult();
     }
 
-    internal void Update(UserSettings settings) => _dispatcher.BeginInvoke(() => _settings = settings);
+    internal void Update(UserSettings settings) => Post(() => _settings = settings);
 
-    internal void Capture(nint window) => _dispatcher.BeginInvoke(() => _captureWindow = window);
+    internal void Capture(nint window) => Post(() => _captureWindow = window);
 
-    internal void Toggle() => _dispatcher.BeginInvoke(ToggleDisplays);
+    internal void Toggle() => Post(ToggleDisplays);
 
-    private void Run(TaskCompletionSource<Dispatcher> started)
+    private void Post(Action action)
     {
-        var dispatcher = Dispatcher.CurrentDispatcher;
+        _actions.Enqueue(action);
+        PostMessage(_window, RunAction);
+    }
+
+    private void Run(TaskCompletionSource started)
+    {
+        NativeWindow? window = null;
         nint keyboard = 0;
         nint mouse = 0;
         nint notification = 0;
         try
         {
-            _sleepDelay = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = TimeSpan.FromMilliseconds(550) };
-            _sleepDelay.Tick += (_, _) => TurnOff();
-            _window = new HwndSource(new HwndSourceParameters("DisplayRest display events")
-            {
-                WindowStyle = unchecked((int)0x80000000), // Hidden WS_POPUP
-                Width = 1,
-                Height = 1,
-                HwndSourceHook = PowerEvent
-            });
-            notification = RegisterPowerSettingNotification(_window.Handle, in SessionDisplayStatus, 0);
+            window = new NativeWindow("DisplayRest.Input", WindowMessage);
+            _window = window.Handle;
+            notification = RegisterPowerSettingNotification(_window, in SessionDisplayStatus, 0);
             if (notification == 0)
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
@@ -90,39 +93,56 @@ internal sealed class DisplayControl : IDisposable
                 _modifiers.Add(modifier);
                 _forwardedKeys[modifier] = true;
             }
-            started.SetResult(dispatcher);
-            Dispatcher.Run();
+            started.SetResult();
+            NativeWindow.Pump();
         }
         catch (Exception error)
         {
             if (!started.TrySetException(error))
-                _ui.BeginInvoke(() => System.Windows.Application.Current.Shutdown(1));
+                _postToUi(() => PostQuitMessage(1));
         }
         finally
         {
             if (mouse != 0) UnhookWindowsHookEx(mouse);
             if (keyboard != 0) UnhookWindowsHookEx(keyboard);
             if (notification != 0) UnregisterPowerSettingNotification(notification);
-            _window?.Dispose();
+            window?.Dispose();
         }
     }
 
-    private nint PowerEvent(nint window, int msg, nint wParam, nint lParam, ref bool handled)
+    private nint? WindowMessage(nint window, int msg, nint wParam, nint lParam)
     {
+        switch (msg)
+        {
+            case RunAction:
+                while (_actions.TryDequeue(out var action))
+                    action();
+                return 0;
+            case StopThread:
+                PostQuitMessage(0);
+                return 0;
+            case WakeDisplays:
+                Wake();
+                return 0;
+            case SleepAgain:
+                if (_off && !_wakeQueued)
+                    SetDisplays(_window, on: false);
+                return 0;
+            case TimerMessage when wParam == 1:
+                if (_sleepPending)
+                    TurnOff();
+                return 0;
+        }
         if (msg != PowerBroadcast || wParam != PowerSettingChange || lParam == 0 ||
             Marshal.PtrToStructure<Guid>(lParam) != SessionDisplayStatus || Marshal.ReadInt32(lParam, 16) != sizeof(int))
-            return 0;
+            return null;
 
         int state = Marshal.ReadInt32(lParam, 20);
         if (state == 1 && _off && Environment.TickCount64 < _blockedWakeUntil)
         {
             // Windows or the video driver may react before a blocked input reaches the hook.
             _blockedWakeUntil = 0;
-            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Normal, () =>
-            {
-                if (_off && !_wakeQueued)
-                    SetDisplays(_window.Handle, on: false);
-            });
+            PostMessage(_window, SleepAgain);
             return 0;
         }
         if (state is 0 or 1)
@@ -139,33 +159,41 @@ internal sealed class DisplayControl : IDisposable
     {
         if (IsOff)
             Wake();
-        else if (_sleepDelay.IsEnabled)
-            _sleepDelay.Stop();
+        else if (_sleepPending)
+            CancelSleep();
         else
-            _sleepDelay.Start();
+            _sleepPending = SetTimer(_window, 1, 550) != 0;
+    }
+
+    private void CancelSleep()
+    {
+        if (!_sleepPending)
+            return;
+        KillTimer(_window, 1);
+        _sleepPending = false;
     }
 
     private void TurnOff()
     {
-        _sleepDelay.Stop();
+        CancelSleep();
         if (IsOff)
             return;
 
         var now = Environment.TickCount64;
         _offRequestedUntil = now + 2200;
         _ignoreWakeUntil = now + 260;
-        SetDisplays(_window.Handle, on: false);
+        SetDisplays(_window, on: false);
     }
 
     private void Wake()
     {
         _wakeQueued = false;
-        _sleepDelay.Stop();
+        CancelSleep();
         _offRequestedUntil = 0;
         _blockedWakeUntil = 0;
         _ignoreToggleUntil = Environment.TickCount64 + 700;
         SetOffState(false);
-        SetDisplays(_window.Handle, on: true);
+        SetDisplays(_window, on: true);
     }
 
     private void SetOffState(bool value)
@@ -174,8 +202,8 @@ internal sealed class DisplayControl : IDisposable
             return;
         _off = value;
         if (value)
-            _sleepDelay.Stop();
-        _ui.BeginInvoke(() => DisplayChanged?.Invoke(value));
+            CancelSleep();
+        _postToUi(() => DisplayChanged?.Invoke(value));
     }
 
     private void QueueWake()
@@ -183,7 +211,7 @@ internal sealed class DisplayControl : IDisposable
         if (_wakeQueued)
             return;
         _wakeQueued = true;
-        Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Send, Wake);
+        PostMessage(_window, WakeDisplays);
     }
 
     private nint KeyboardInput(int code, nint wParam, nint lParam)
@@ -237,7 +265,7 @@ internal sealed class DisplayControl : IDisposable
         {
             _captureWindow = 0;
             var captured = chord;
-            _ui.BeginInvoke(() => ShortcutCaptured?.Invoke(captured));
+            _postToUi(() => ShortcutCaptured?.Invoke(captured));
             block = true;
         }
         else if (chord is { } && chord == _settings.Shortcut)
@@ -245,7 +273,7 @@ internal sealed class DisplayControl : IDisposable
             if (IsOff)
                 QueueWake();
             else if (now >= _ignoreToggleUntil)
-                Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Send, ToggleDisplays);
+                Toggle();
             block = true;
         }
         else if (IsOff)
@@ -317,7 +345,7 @@ internal sealed class DisplayControl : IDisposable
 
     public void Dispose()
     {
-        _dispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
+        PostMessage(_window, StopThread);
         _thread.Join(TimeSpan.FromSeconds(1));
     }
 }

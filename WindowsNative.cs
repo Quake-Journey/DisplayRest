@@ -4,7 +4,7 @@ using System.Text;
 
 namespace DisplayRest;
 
-internal static class WindowsNative
+internal static partial class WindowsNative
 {
     internal const int KeyboardLowLevel = 13;
     internal const int MouseLowLevel = 14;
@@ -42,7 +42,7 @@ internal static class WindowsNative
     internal static extern short GetAsyncKeyState(int key);
 
     [DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
-    private static extern nint DefWindowProc(nint window, int message, nint wParam, nint lParam);
+    internal static extern nint DefWindowProc(nint window, int message, nint wParam, nint lParam);
 
     [DllImport("kernel32.dll")]
     private static extern uint SetThreadExecutionState(uint flags);
