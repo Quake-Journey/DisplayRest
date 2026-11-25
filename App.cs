@@ -1,17 +1,20 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Security;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using static DisplayRest.WindowsNative;
 
 namespace DisplayRest;
 
 internal sealed class App
 {
+    internal const string Name = "PC Rest";
     private const string Instance = @"Local\DisplayRest-23E24AF4-B771-4A7E-A2C6-3B7753BD5680";
     internal const string AppId = "DisplayRest.DisplayRest";
     private const int ProcessActions = AppMessage + 1;
@@ -19,6 +22,7 @@ internal sealed class App
     private const int OpenCommand = 1;
     private const int ToggleCommand = 2;
     private const int ExitCommand = 3;
+    private const int FirstPresetCommand = 20;
 
     private readonly ConcurrentQueue<Action> _messages = new();
     private UserSettings _settings = new();
@@ -33,6 +37,7 @@ internal sealed class App
     private bool _exitRequested;
     private bool _showingDuplicateWarning;
     private AutomaticUpdate? _updates;
+    private bool _runningActions;
 
     [STAThread]
     private static int Main(string[] args)
@@ -87,7 +92,8 @@ internal sealed class App
             _host = host;
             using var control = new DisplayControl(_settings, Post);
             _control = control;
-            _control.ShortcutCaptured += shortcut => _window?.AcceptShortcut(shortcut);
+            _control.ShortcutCaptured += (shortcut, id) => _window?.AcceptShortcut(shortcut, id);
+            _control.CommandPressed += command => Execute(command, confirm: false);
             _control.DisplayChanged += off =>
             {
                 _displaysOff = off;
@@ -119,7 +125,7 @@ internal sealed class App
         }
         catch (Win32Exception error)
         {
-            MessageBox(0, UiText.Get("DisplayControlError", error.NativeErrorCode), "DisplayRest", 0x10);
+            MessageBox(0, UiText.Get("DisplayControlError", error.NativeErrorCode), Name, 0x10);
             return 1;
         }
     }
@@ -175,10 +181,102 @@ internal sealed class App
             Flags = 7, // callback, icon, tooltip
             Callback = TrayCallback,
             Icon = NativeWindow.Icon,
-            Tip = "DisplayRest"
+            Tip = Name
         };
         ShellNotifyIcon(operation, ref data);
     }
+
+    private void ShowActionFailure(string message)
+    {
+        if (_window is { } window)
+        {
+            window.ReportAction(message, error: true);
+            return;
+        }
+        var data = new NotifyIconData
+        {
+            Size = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NotifyIconData>(),
+            Window = _host.Handle,
+            Id = 1,
+            Flags = 0x10, // NIF_INFO
+            Info = message[..Math.Min(message.Length, 255)],
+            InfoTitle = Name,
+            InfoFlags = 2
+        };
+        ShellNotifyIcon(1, ref data);
+    }
+
+    private void Execute(CommandId command, bool confirm)
+    {
+        if (_runningActions || _exitRequested)
+            return;
+        if (command.Target == CommandTarget.Displays)
+        {
+            _control.Toggle();
+            return;
+        }
+        RestRequest? request = command.Target switch
+        {
+            CommandTarget.Sleep => new(RestAction.Sleep),
+            CommandTarget.Hdr => new(RestAction.Hdr),
+            CommandTarget.Gamepads => new(RestAction.Gamepads),
+            CommandTarget.Preset when _settings.FindPreset(command.Preset) is { } preset => new(preset.Actions, preset.HdrMode),
+            _ => null
+        };
+        if (request is null)
+            return;
+        var settings = _settings;
+        _runningActions = true;
+        if (confirm && (request.Actions & RestAction.Sleep) != 0 &&
+            MessageBox(_window?.Handle ?? 0, UiText.Get("ConfirmSleep"), Name, 0x124) != 6)
+        {
+            _runningActions = false;
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            // Allow the hotkey or the mouse button that invoked the command to be released.
+            await Task.Delay(550).ConfigureAwait(false);
+            var failures = new List<(RestAction Action, string Key, int? Code)>();
+            foreach (var action in request.Steps())
+            {
+                try
+                {
+                    switch (action)
+                    {
+                        case RestAction.Gamepads: BluetoothGamepads.Disconnect(settings.GamepadTarget); break;
+                        case RestAction.Hdr: HdrDisplays.Set(settings.HdrTarget, request.HdrMode); break;
+                        case RestAction.Lock: PcPower.Lock(); break;
+                        case RestAction.Displays: await _control.TurnOffForPreset().ConfigureAwait(false); break;
+                        case RestAction.Sleep: PcPower.Sleep(); break;
+                    }
+                }
+                catch (RestUnavailableException error) { failures.Add((action, error.Key, null)); }
+                catch (Win32Exception error) { failures.Add((action, "ActionNativeError", error.NativeErrorCode)); }
+                catch (Exception error) when (error is EntryPointNotFoundException or DllNotFoundException)
+                { failures.Add((action, "ActionUnsupported", null)); }
+            }
+            Post(() =>
+            {
+                _runningActions = false;
+                _window?.RefreshActionDevices();
+                if (failures.Count == 0)
+                    return;
+                var messages = failures.Select(item =>
+                    $"{UiText.Get(ActionText(item.Action))} — {UiText.Get(item.Key, item.Code)}");
+                ShowActionFailure(string.Join(Environment.NewLine, messages));
+            });
+        });
+    }
+
+    internal static string ActionText(RestAction action) => action switch
+    {
+        RestAction.Sleep => "PcSleep",
+        RestAction.Hdr => "Hdr",
+        RestAction.Gamepads => "GamepadDisconnect",
+        RestAction.Lock => "PresetLock",
+        _ => "PresetDisplays"
+    };
 
     private void TrayMenu()
     {
@@ -189,6 +287,11 @@ internal sealed class App
         {
             AppendMenu(menu, 0, OpenCommand, UiText.Get("MenuOpen"));
             AppendMenu(menu, 0, ToggleCommand, UiText.Get(_displaysOff ? "MenuDisplayOn" : "MenuDisplayOff"));
+            var presets = _settings.PresetList;
+            if (presets.Length != 0)
+                AppendMenu(menu, 0x800, 0, null);
+            for (int index = 0; index < presets.Length; index++)
+                AppendMenu(menu, 0, (nuint)(FirstPresetCommand + index), presets[index].Name.Replace("&", "&&"));
             AppendMenu(menu, 0x800, 0, null);
             AppendMenu(menu, 0, ExitCommand, UiText.Get("MenuExit"));
             GetCursorPos(out var point);
@@ -200,6 +303,11 @@ internal sealed class App
                 case OpenCommand: OpenWindow(); break;
                 case ToggleCommand: _control.Toggle(); break;
                 case ExitCommand: Exit(); break;
+                default:
+                    uint index = command - FirstPresetCommand;
+                    if (index < presets.Length)
+                        Execute(new(CommandTarget.Preset, presets[index].Id), confirm: true);
+                    break;
             }
         }
         finally { DestroyMenu(menu); }
@@ -210,13 +318,14 @@ internal sealed class App
         try
         {
             _window ??= new MainWindow(_control, _settings, _displaysOff, _settingsError, UpdateSettings,
-                minimize: DestroySettingsWindow, close: CloseSettingsWindow);
+                Execute,
+                minimize: DestroySettingsWindow, close: CloseSettingsWindow, exit: Exit);
             ApplyTaskbarMenu();
             _window.Show();
         }
         catch (Win32Exception error)
         {
-            MessageBox(0, UiText.Get("DisplayControlError", error.NativeErrorCode), "DisplayRest", 0x10);
+            MessageBox(0, UiText.Get("DisplayControlError", error.NativeErrorCode), Name, 0x10);
         }
     }
 
@@ -228,7 +337,7 @@ internal sealed class App
         try
         {
             OpenWindow();
-            MessageBox(_window?.Handle ?? 0, UiText.Get("AlreadyRunning"), "DisplayRest", 0x30);
+            MessageBox(_window?.Handle ?? 0, UiText.Get("AlreadyRunning"), Name, 0x30);
         }
         finally { _showingDuplicateWarning = false; }
     }
@@ -238,7 +347,7 @@ internal sealed class App
         if (_settings.AutoUpdate)
         {
             _updates ??= new AutomaticUpdate(Instance, Post,
-                () => _settings.AutoUpdate && !_exitRequested && _window is null && !_displaysOff, Exit);
+                () => _settings.AutoUpdate && !_exitRequested && !_runningActions && _window is null && !_displaysOff, Exit);
             SetTimer(_host.Handle, 2, 15000);
         }
         else

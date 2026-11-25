@@ -10,13 +10,22 @@ using static DisplayRest.WindowsNative;
 
 namespace DisplayRest;
 
-internal sealed class MainWindow : IDisposable
+internal sealed partial class MainWindow : IDisposable
 {
     private enum Control
     {
         Language = 100, LanguageLabel, Heading, Intro, HotkeyTitle, Shortcut, Capture, Clear, ShortcutHint,
         ShortcutStatus, WakeTitle, MouseWake, KeyboardWake, WakeHint, TimerTitle, Scheme, AcLabel, DcLabel,
-        Ac, Dc, Apply, TimerUnits, TimerStatus, CloseToTray, StartInTray, Startup, ToggleDisplay, Status, AutoUpdate
+        Ac, Dc, Apply, TimerUnits, TimerStatus, CloseToTray, StartInTray, Startup, ToggleDisplay, Status, AutoUpdate,
+        TabDisplays = 150, TabPc, TabGamepads, TabPresets, TabSettings,
+        HdrHeading = 160, HdrPick, HdrRefresh, HdrRun, HdrState, HdrKey, HdrCapture, HdrClear,
+        PcHeading = 180, PcIntro, PcStatus, PcKey, PcCapture, PcClear, PcRun,
+        GamepadHeading = 200, GamepadIntro, GamepadPick, GamepadRefresh, GamepadRun, GamepadState,
+        GamepadKey, GamepadCapture, GamepadClear,
+        PresetsHeading = 220, PresetCount, PresetPick, PresetNew, PresetDelete, PresetRun, PresetNameLabel, PresetName,
+        PresetDescriptionLabel, PresetDescription, PresetActions, PresetDisplays, PresetSleep, PresetHdr, PresetGamepads,
+        PresetLock, PresetHdrMode, PresetKey, PresetCapture, PresetClear, PresetSave, PresetHint,
+        SettingsHeading = 250, SettingsExit
     }
 
     private sealed record Notice(string Key, bool Error = false, object? Detail = null);
@@ -27,8 +36,10 @@ internal sealed class MainWindow : IDisposable
     private const uint Background = 0x1A100B, Panel = 0x291B12, Outline = 0x473225, Field = 0x23160E;
     private readonly DisplayControl _control;
     private readonly Action<UserSettings> _change;
+    private readonly Action<CommandId, bool> _execute;
     private readonly Action _minimize;
     private readonly Action _close;
+    private readonly Action _exit;
     private readonly NativeWindow _window;
     private readonly double _scale;
     private readonly Dictionary<Control, nint> _controls = new();
@@ -49,14 +60,16 @@ internal sealed class MainWindow : IDisposable
     internal nint Handle => _window.Handle;
 
     internal MainWindow(DisplayControl control, UserSettings settings, bool displaysOff, bool settingsError,
-        Action<UserSettings> change, Action minimize, Action close)
+        Action<UserSettings> change, Action<CommandId, bool> execute, Action minimize, Action close, Action exit)
     {
         _control = control;
         _settings = settings;
         _displaysOff = displaysOff;
         _change = change;
+        _execute = execute;
         _minimize = minimize;
         _close = close;
+        _exit = exit;
 
         var assembly = typeof(App).Assembly;
         _version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+', 2)[0]
@@ -76,7 +89,7 @@ internal sealed class MainWindow : IDisposable
         AdjustWindowRectEx(ref bounds, style, false, extendedStyle);
         int width = bounds.Right - bounds.Left;
         int height = bounds.Bottom - bounds.Top;
-        _window = new NativeWindow("DisplayRest.Settings", WindowMessage, "DisplayRest", style,
+        _window = new NativeWindow("DisplayRest.Settings", WindowMessage, App.Name, style,
             area.Left + (workWidth - width) / 2, area.Top + (workHeight - height) / 2, width, height, extendedStyle);
         try
         {
@@ -100,8 +113,8 @@ internal sealed class MainWindow : IDisposable
             SendMessage(_tips, 0x0418, 0, Px(310)); // TTM_SETMAXTIPWIDTH
             CreateControls();
             RenderLanguage();
+            ShowPage(Page.Displays);
             RefreshPlan();
-            RefreshStartup();
             if (settingsError)
                 SetStatus("SettingsReadError", true);
             SetTimer(Handle, 1, 2000);
@@ -119,37 +132,35 @@ internal sealed class MainWindow : IDisposable
         Label(Control.LanguageLabel, 386, 20, 74, 22, Muted, _small);
         Add(Control.Language, "COMBOBOX", 464, 13, 166, 240, TabStop | 3 | 0x00200000, Ink, Background);
         SetWindowTheme(_controls[Control.Language], "DarkMode_Explorer", null);
-        Label(Control.Heading, 22, 56, 608, 39, Ink, _heading);
-        Label(Control.Intro, 23, 98, 606, 22, Muted);
+        CreateNavigation();
+        Label(Control.Status, 23, 655, 606, 36, Muted, _small, wrap: true);
 
-        Label(Control.HotkeyTitle, 40, 145, 570, 22, Ink, _medium, Panel);
-        Label(Control.Shortcut, 51, 184, 330, 22, Accent, _normal, Field);
-        Button(Control.Capture, 411, 173, 103);
-        Button(Control.Clear, 520, 173, 90);
-        Label(Control.ShortcutHint, 40, 215, 570, 18, Muted, _small, Panel);
-        Label(Control.ShortcutStatus, 40, 235, 570, 34, Muted, _small, Panel, wrap: true);
+        _buildingPage = Page.Displays;
+        Label(Control.Heading, 22, 101, 608, 39, Ink, _heading);
+        Label(Control.HotkeyTitle, 40, 159, 390, 22, Ink, _medium, Panel);
+        Button(Control.ToggleDisplay, 447, 153, 163);
+        AddShortcutRow(Control.Shortcut, Control.Capture, Control.Clear, 192);
+        Label(Control.ShortcutHint, 40, 231, 570, 18, Muted, _small, Panel);
+        Label(Control.ShortcutStatus, 40, 250, 570, 31, Muted, _small, Panel, wrap: true);
+        CheckBox(Control.MouseWake, 40, 285, 310, Panel);
+        CheckBox(Control.KeyboardWake, 357, 285, 251, Panel);
+        Label(Control.WakeHint, 40, 311, 570, 20, Muted, _small, Panel);
 
-        Label(Control.WakeTitle, 40, 295, 570, 23, Ink, _medium, Panel);
-        CheckBox(Control.MouseWake, 40, 327, 310, Panel);
-        CheckBox(Control.KeyboardWake, 357, 327, 251, Panel);
-        Label(Control.WakeHint, 40, 356, 570, 22, Muted, _small, Panel);
-
-        Label(Control.TimerTitle, 40, 407, 570, 23, Ink, _medium, Panel);
-        Label(Control.Scheme, 40, 435, 570, 19, Muted, _small, Panel);
-        Label(Control.AcLabel, 41, 465, 212, 19, Ink, _normal, Panel);
-        Label(Control.DcLabel, 270, 465, 210, 19, Ink, _normal, Panel);
-        Edit(Control.Ac, 40);
-        Edit(Control.Dc, 269);
-        Button(Control.Apply, 505, 489, 105);
-        Label(Control.TimerUnits, 40, 529, 570, 17, Muted, _small, Panel);
-        Label(Control.TimerStatus, 40, 549, 570, 32, Muted, _small, Panel, wrap: true);
-
-        CheckBox(Control.CloseToTray, 22, 596, 430, Background);
-        CheckBox(Control.StartInTray, 22, 620, 290, Background);
-        CheckBox(Control.Startup, 323, 620, 305, Background);
-        Button(Control.ToggleDisplay, 468, 591, 162);
-        CheckBox(Control.AutoUpdate, 22, 644, 400, Background);
-        Label(Control.Status, 22, 672, 608, 18, Muted, _small);
+        Label(Control.TimerTitle, 40, 351, 570, 23, Ink, _medium, Panel);
+        Label(Control.Scheme, 40, 375, 570, 19, Muted, _small, Panel);
+        Label(Control.AcLabel, 41, 400, 212, 19, Ink, _normal, Panel);
+        Label(Control.DcLabel, 270, 400, 210, 19, Ink, _normal, Panel);
+        TimerEdit(Control.Ac, 40);
+        TimerEdit(Control.Dc, 269);
+        Button(Control.Apply, 505, 421, 105);
+        Label(Control.TimerUnits, 40, 460, 570, 17, Muted, _small, Panel);
+        Label(Control.TimerStatus, 40, 478, 570, 30, Muted, _small, Panel, wrap: true);
+        CreateHdrControls();
+        CreatePcControls();
+        CreateGamepadControls();
+        CreatePresetControls();
+        CreateSettingsControls();
+        _buildingPage = null;
     }
 
     internal void Show()
@@ -197,22 +208,33 @@ internal sealed class MainWindow : IDisposable
                 DrawButton(Marshal.PtrToStructure<DrawItem>(lParam));
                 return 1;
             case TimerMessage when wParam == 1:
-                RefreshPlan();
+                if (_page == Page.Displays)
+                    RefreshPlan();
+                return 0;
+            case 0x007E when _initialized: // WM_DISPLAYCHANGE
+                if (_page == Page.Displays)
+                    SetTimer(window, 4, 300);
+                return 0;
+            case TimerMessage when wParam == 4:
+                KillTimer(window, 4);
+                if (_page == Page.Displays)
+                    RefreshHdr();
                 return 0;
             case ActivateMessage:
                 if (((uint)wParam & 0xFFFF) == 0)
                     StopCapture();
                 else if (_initialized)
                 {
-                    RefreshPlan();
-                    RefreshStartup();
+                    RefreshPage();
                 }
                 return 0;
             case SystemCommand when ((uint)wParam & 0xFFF0) == 0xF020: // SC_MINIMIZE
-                _minimize();
+                if (ConfirmDiscardDraft())
+                    _minimize();
                 return 0;
             case CloseMessage:
-                _close();
+                if (ConfirmDiscardDraft())
+                    _close();
                 return 0;
         }
         return null;
@@ -221,6 +243,8 @@ internal sealed class MainWindow : IDisposable
     private void ControlCommand(Control id, uint notification)
     {
         if (_updating)
+            return;
+        if (PageCommand(id, notification))
             return;
         if (id is Control.Ac or Control.Dc && notification == 0x0300)
         {
@@ -240,15 +264,7 @@ internal sealed class MainWindow : IDisposable
         switch (id)
         {
             case Control.Capture:
-                if (_capturing)
-                    StopCapture();
-                else
-                {
-                    _capturing = true;
-                    _shortcutStatus = null;
-                    _control.Capture(Handle);
-                    RenderShortcut();
-                }
+                BeginCapture(CommandTarget.Displays);
                 break;
             case Control.Clear:
                 if (!_settings.WakeByMouse && !_settings.WakeByKeyboard)
@@ -276,11 +292,19 @@ internal sealed class MainWindow : IDisposable
         }
     }
 
-    internal void AcceptShortcut(Shortcut shortcut)
+    internal void AcceptShortcut(Shortcut shortcut, long id)
     {
-        if (!_capturing)
+        if (!_capturing || id != _captureId)
             return;
+        var target = _captureTarget;
         StopCapture();
+        if (target != CommandTarget.Displays)
+        {
+            AcceptActionShortcut(target, shortcut);
+            return;
+        }
+        if (ReportConflict(shortcut, new(CommandTarget.Displays), inDisplayCard: true))
+            return;
         var result = HotkeyRegistration.Check(Handle, shortcut);
         if (result == HotkeyCheck.InUse)
             _shortcutStatus = new("HotkeyBusy", true, shortcut);
@@ -296,6 +320,7 @@ internal sealed class MainWindow : IDisposable
         _capturing = false;
         _control.Capture(0);
         RenderShortcut();
+        RenderActionShortcuts();
     }
 
     private bool Save(UserSettings settings)
@@ -316,6 +341,7 @@ internal sealed class MainWindow : IDisposable
         {
             RenderChecks();
             RenderShortcut();
+            RenderActionShortcuts();
         }
         _change(settings);
         SetStatus("SettingsSaved");
@@ -334,8 +360,8 @@ internal sealed class MainWindow : IDisposable
         SendMessage(options, ComboSelect, (int)_settings.Language);
 
         SetLabels(
-            (Control.LanguageLabel, "LanguageLabel"), (Control.Heading, "Heading"), (Control.Intro, "Intro"),
-            (Control.HotkeyTitle, "HotkeyTitle"), (Control.Clear, "ClearHotkey"), (Control.WakeTitle, "WakeTitle"),
+            (Control.LanguageLabel, "LanguageLabel"), (Control.Heading, "DisplayHeading"),
+            (Control.HotkeyTitle, "Heading"), (Control.Clear, "ClearHotkey"),
             (Control.MouseWake, "WakeMouse"), (Control.KeyboardWake, "WakeKeyboard"), (Control.TimerTitle, "TimerTitle"),
             (Control.AcLabel, "AcLabel"), (Control.DcLabel, "DcLabel"), (Control.Apply, "Apply"),
             (Control.TimerUnits, "TimerUnits"), (Control.CloseToTray, "CloseToTray"),
@@ -353,6 +379,7 @@ internal sealed class MainWindow : IDisposable
         RenderShortcut();
         RenderPlan();
         DisplayChanged(_displaysOff);
+        RenderPages();
         _updating = false;
     }
 
@@ -374,12 +401,13 @@ internal sealed class MainWindow : IDisposable
     private void RenderShortcut()
     {
         var shortcut = _settings.Shortcut;
-        Text(Control.Shortcut, _capturing ? UiText.Get("HotkeyWaiting") : shortcut?.ToString() ?? UiText.Get("HotkeyNone"));
-        Text(Control.Capture, UiText.Get(_capturing ? "Cancel" : shortcut is null ? "HotkeyAssign" : "HotkeyChange"));
-        Text(Control.ShortcutHint, UiText.Get(_capturing ? "CaptureHint" : "HotkeyExamples"));
+        bool capturing = _capturing && _captureTarget == CommandTarget.Displays;
+        Text(Control.Shortcut, capturing ? UiText.Get("HotkeyWaiting") : shortcut?.ToString() ?? UiText.Get("HotkeyNone"));
+        Text(Control.Capture, UiText.Get(capturing ? "Cancel" : shortcut is null ? "HotkeyAssign" : "HotkeyChange"));
+        Text(Control.ShortcutHint, UiText.Get(capturing ? "CaptureHint" : "HotkeyExamples"));
         Text(Control.WakeHint, shortcut is null ? UiText.Get("WakeDefault") : UiText.Get("WakeHotkey", shortcut));
-        SetTips((Control.Capture, _capturing ? "CancelTip" : "CaptureTip"));
-        EnableWindow(_controls[Control.Clear], !_capturing && shortcut is not null);
+        SetTips((Control.Capture, capturing ? "CancelTip" : "CaptureTip"));
+        EnableWindow(_controls[Control.Clear], !capturing && shortcut is not null);
         ShowNotice(Control.ShortcutStatus, _shortcutStatus);
     }
 
@@ -511,6 +539,8 @@ internal sealed class MainWindow : IDisposable
         SendMessage(window, 0x0030, font == 0 ? _normal : font, 1); // WM_SETFONT
         _controls.Add(id, window);
         _colors.Add(window, (id, color, background));
+        if (_buildingPage is { } page)
+            _controlPages.Add(id, page);
     }
 
     private void Label(Control id, int x, int y, int width, int height, uint color, nint font = 0,
@@ -526,10 +556,16 @@ internal sealed class MainWindow : IDisposable
         SetWindowTheme(_controls[id], "", "");
     }
 
-    private void Edit(Control id, int x)
+    private void TimerEdit(Control id, int x)
     {
-        Add(id, "EDIT", x, 490, 214, 32, TabStop | 0x80 | 0x00800000, Ink, Field);
-        SendMessage(_controls[id], 0x00C5, 18); // EM_SETLIMITTEXT
+        EditAt(id, x, 421, 214, 32, 18);
+    }
+
+    private void EditAt(Control id, int x, int y, int width, int height, int limit, bool multiline = false)
+    {
+        Add(id, "EDIT", x, y, width, height,
+            TabStop | 0x00800000 | (multiline ? 0x00201044u : 0x80u), Ink, Field);
+        SendMessage(_controls[id], 0x00C5, limit); // EM_SETLIMITTEXT
         SendMessage(_controls[id], 0x00D3, 3, Px(8) | Px(8) << 16); // EM_SETMARGINS
     }
 
@@ -565,7 +601,7 @@ internal sealed class MainWindow : IDisposable
 
     private static string ReadText(nint window)
     {
-        var text = new StringBuilder(192);
+        var text = new StringBuilder(512);
         GetWindowText(window, text, text.Capacity);
         return text.ToString();
     }
@@ -590,18 +626,15 @@ internal sealed class MainWindow : IDisposable
         int saved = SaveDC(dc);
         GetClientRect(window, out var client);
         FillRect(dc, in client, _background);
-        Rounded(dc, Bounds(22, 129, 630, 275), _outline, _panel, 12);
-        Rounded(dc, Bounds(22, 280, 630, 388), _outline, _panel, 12);
-        Rounded(dc, Bounds(22, 392, 630, 585), _outline, _panel, 12);
-        Rounded(dc, Bounds(40, 173, 400, 207), _outline, _field, 8);
+        PaintPage(dc);
         SelectObject(dc, _medium);
         SetBkMode(dc, 1);
         SetTextColor(dc, Ink);
-        var heading = Bounds(58, 17, 159, 40);
-        DrawText(dc, "DisplayRest", -1, ref heading, 0x24);
+        var heading = Bounds(58, 17, 135, 40);
+        DrawText(dc, App.Name, -1, ref heading, 0x24);
         SelectObject(dc, _small);
         SetTextColor(dc, Muted);
-        var version = Bounds(165, 17, 270, 40);
+        var version = Bounds(140, 17, 270, 40);
         DrawText(dc, _version, -1, ref version, 0x24);
         DrawIconEx(dc, Px(23), Px(13), NativeWindow.Icon, Px(28), Px(28), 0, 0, 3);
         RestoreDC(dc, saved);
@@ -612,10 +645,12 @@ internal sealed class MainWindow : IDisposable
     private void DrawButton(DrawItem item)
     {
         int saved = SaveDC(item.Dc);
-        bool primary = item.Id == (uint)Control.Apply && (item.State & 4) == 0;
+        var id = (Control)item.Id;
+        bool primary = id == TabControl(_page) ||
+            ((id is Control.Apply or Control.PresetSave) && (item.State & 4) == 0);
         bool pressed = (item.State & 1) != 0, focused = (item.State & 0x10) != 0;
         var area = item.Area;
-        FillRect(item.Dc, in area, item.Id == (uint)Control.ToggleDisplay ? _background : _panel);
+        FillRect(item.Dc, in area, _controlPages.ContainsKey(id) ? _panel : _background);
         Rounded(item.Dc, area, focused ? _focus : _outline, primary ? _accent : pressed ? _field : _button, 8);
         SelectObject(item.Dc, _normal);
         SetBkMode(item.Dc, 1);
@@ -642,6 +677,7 @@ internal sealed class MainWindow : IDisposable
         if (_capturing)
             _control.Capture(0);
         KillTimer(Handle, 1);
+        KillTimer(Handle, 4);
         if (_tips != 0)
             DestroyWindow(_tips);
         foreach (var value in _tipText.Values)

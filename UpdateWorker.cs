@@ -13,7 +13,8 @@ namespace DisplayRest;
 internal static class UpdateWorker
 {
     private const string Repo = "Quake-Journey/DisplayRest";
-    private const string AssetName = "DisplayRest.exe";
+    private const string AssetName = "PCRest.exe";
+    private const string LegacyAssetName = "DisplayRest.exe";
     private static readonly Uri Latest = new($"https://api.github.com/repos/{Repo}/releases/latest");
     private const int Limit = 100 * 1024 * 1024;
 
@@ -43,7 +44,7 @@ internal static class UpdateWorker
                     {
                         MaxResponseContentBufferSize = 2 * 1024 * 1024
                     };
-                    http.DefaultRequestHeaders.UserAgent.ParseAdd($"DisplayRest/{current.Major}.{current.Minor}");
+                    http.DefaultRequestHeaders.UserAgent.ParseAdd($"PCRest/{current.Major}.{current.Minor}");
                     var asset = ReadLatest(http, current, timeout.Token).GetAwaiter().GetResult();
                     if (asset is null || parent.HasExited)
                         return 0;
@@ -95,17 +96,23 @@ internal static class UpdateWorker
             tag is null || !tag.StartsWith('v') || !TryVersion(tag.AsSpan(1), out var next) || next <= current)
             return null;
 
-        var expected = new Uri($"https://github.com/{Repo}/releases/download/{Uri.EscapeDataString(tag)}/{AssetName}");
-        foreach (var entry in release.GetProperty("assets").EnumerateArray())
+        var assets = release.GetProperty("assets");
+        return FindAsset(assets, tag, next, AssetName) ?? FindAsset(assets, tag, next, LegacyAssetName);
+    }
+
+    private static ReleaseAsset? FindAsset(JsonElement assets, string tag, Version version, string name)
+    {
+        var expected = new Uri($"https://github.com/{Repo}/releases/download/{Uri.EscapeDataString(tag)}/{name}");
+        foreach (var entry in assets.EnumerateArray())
         {
-            if (entry.GetProperty("name").GetString() != AssetName ||
+            if (entry.GetProperty("name").GetString() != name ||
                 entry.GetProperty("state").GetString() != "uploaded" ||
                 entry.GetProperty("browser_download_url").GetString() != expected.AbsoluteUri)
                 continue;
             long size = entry.GetProperty("size").GetInt64();
             var digest = entry.GetProperty("digest").GetString();
             if (size is > 0 and <= Limit && digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.Ordinal))
-                return new(next, expected, size, Convert.FromHexString(digest.AsSpan(7)));
+                return new(version, expected, size, Convert.FromHexString(digest.AsSpan(7)));
         }
         return null;
     }

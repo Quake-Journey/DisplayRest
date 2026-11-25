@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,7 +27,9 @@ internal sealed class DisplayControl : IDisposable
     private nint _window;
     private bool _sleepPending;
     private UserSettings _settings;
+    private Dictionary<Shortcut, CommandId> _bindings;
     private nint _captureWindow;
+    private long _captureId;
     private bool _modifierOnly;
     private bool _off;
     private long _offRequestedUntil;
@@ -36,12 +39,14 @@ internal sealed class DisplayControl : IDisposable
     private long _lastPause;
     private bool _wakeQueued;
 
-    internal event Action<Shortcut>? ShortcutCaptured;
+    internal event Action<Shortcut, long>? ShortcutCaptured;
+    internal event Action<CommandId>? CommandPressed;
     internal event Action<bool>? DisplayChanged;
 
     internal DisplayControl(UserSettings settings, Action<Action> postToUi)
     {
         _settings = settings;
+        _bindings = Bindings(settings);
         _postToUi = postToUi;
         _keyboardHook = KeyboardInput;
         _mouseHook = MouseInput;
@@ -52,11 +57,26 @@ internal sealed class DisplayControl : IDisposable
         started.Task.GetAwaiter().GetResult();
     }
 
-    internal void Update(UserSettings settings) => Post(() => _settings = settings);
+    internal void Update(UserSettings settings)
+    {
+        var bindings = Bindings(settings);
+        Post(() => { _settings = settings; _bindings = bindings; });
+    }
 
-    internal void Capture(nint window) => Post(() => _captureWindow = window);
+    private static Dictionary<Shortcut, CommandId> Bindings(UserSettings settings) =>
+        settings.Bindings().ToDictionary(binding => binding.Key, binding => binding.Command);
+
+    internal void Capture(nint window, long id = 0) =>
+        Post(() => { _captureWindow = window; _captureId = id; });
 
     internal void Toggle() => Post(ToggleDisplays);
+
+    internal Task TurnOffForPreset()
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Post(() => { TurnOff(); completion.SetResult(); });
+        return completion.Task;
+    }
 
     private void Post(Action action)
     {
@@ -216,8 +236,24 @@ internal sealed class DisplayControl : IDisposable
 
     private nint KeyboardInput(int code, nint wParam, nint lParam)
     {
-        if (code == 0 && ProcessKey(Marshal.ReadInt32(lParam), wParam is KeyDown or SystemKeyDown))
-            return 1;
+        if (code == 0)
+        {
+            int key = Marshal.ReadInt32(lParam);
+            if (key == Shortcut.ControlBreak)
+            {
+                // Windows can report both keys as VK_CANCEL when Ctrl is held.
+                int scanCode = Marshal.ReadInt32(lParam, 4);
+                bool extended = (Marshal.ReadInt32(lParam, 8) & 1) != 0;
+                key = scanCode switch
+                {
+                    0x46 => extended ? Shortcut.Pause : Shortcut.ScrollLock,
+                    0xE046 => Shortcut.Pause,
+                    _ => key
+                };
+            }
+            if (ProcessKey(key, wParam is KeyDown or SystemKeyDown))
+                return 1;
+        }
         return CallNextHookEx(0, code, wParam, lParam);
     }
 
@@ -227,7 +263,7 @@ internal sealed class DisplayControl : IDisposable
         bool isModifier = Shortcut.ModifierFor(key) != Modifiers.None;
         bool wasPressed = _forwardedKeys.TryGetValue(key, out bool forwarded);
         var mods = HeldModifiers();
-        bool pause = key is Shortcut.Pause or 0x03; // Ctrl+Pause can arrive as VK_CANCEL.
+        bool pause = key == Shortcut.Pause;
         if (down && pause && now - _lastPause >= 170)
             wasPressed = false; // Some keyboards send Pause without a break event.
 
@@ -251,7 +287,7 @@ internal sealed class DisplayControl : IDisposable
 
         Shortcut? chord = null;
         if (!isModifier && down && !wasPressed)
-            chord = new Shortcut(pause ? Shortcut.Pause : key, mods);
+            chord = new Shortcut(key, mods);
         else if (isModifier && !down && wasPressed && _modifierOnly)
         {
             chord = new Shortcut(0, mods);
@@ -265,15 +301,21 @@ internal sealed class DisplayControl : IDisposable
         {
             _captureWindow = 0;
             var captured = chord;
-            _postToUi(() => ShortcutCaptured?.Invoke(captured));
+            long id = _captureId;
+            _postToUi(() => ShortcutCaptured?.Invoke(captured, id));
             block = true;
         }
-        else if (chord is { } && chord == _settings.Shortcut)
+        else if (chord is { } && _bindings.TryGetValue(chord, out var command))
         {
-            if (IsOff)
-                QueueWake();
-            else if (now >= _ignoreToggleUntil)
-                Toggle();
+            if (command.Target == CommandTarget.Displays)
+            {
+                if (IsOff)
+                    QueueWake();
+                else if (now >= _ignoreToggleUntil)
+                    Toggle();
+            }
+            else
+                _postToUi(() => CommandPressed?.Invoke(command));
             block = true;
         }
         else if (IsOff)

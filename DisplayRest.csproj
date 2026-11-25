@@ -10,9 +10,12 @@
     <SelfContained>true</SelfContained>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\DisplayRest.ico</ApplicationIcon>
-    <Version>1.1</Version>
+    <AssemblyName>PCRest</AssemblyName>
+    <AssemblyTitle>PC Rest</AssemblyTitle>
+    <Product>DisplayRest</Product>
+    <Version>1.2</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <Description>Управление отключением дисплеев Windows</Description>
+    <Description>PC Rest — дисплеи, сон компьютера и пресеты Windows</Description>
   </PropertyGroup>
   <Target Name="UseServicedAotCompiler" BeforeTargets="ProcessFrameworkReferences">
     <ItemGroup>

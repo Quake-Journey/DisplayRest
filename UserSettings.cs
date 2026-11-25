@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -21,6 +22,8 @@ internal enum Modifiers
 internal sealed record Shortcut(int Key, Modifiers Modifiers)
 {
     internal const int Pause = 0x13;
+    internal const int ScrollLock = 0x91;
+    internal const int ControlBreak = 0x03;
 
     internal bool IsValid => Key is >= 0 and <= 254 &&
         (Key != 0 || Modifiers != Modifiers.None) &&
@@ -60,6 +63,8 @@ internal sealed record Shortcut(int Key, Modifiers Modifiers)
         return key switch
         {
             Pause => "Pause",
+            ScrollLock => "Scroll Lock",
+            ControlBreak => "Break",
             0x1B => "Esc",
             0x20 => "Space",
             0x2C => "Print Screen",
@@ -85,7 +90,9 @@ internal enum LanguagePreference { System, Russian, English }
 
 internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse = true, bool WakeByKeyboard = true,
     LanguagePreference Language = LanguagePreference.System, bool CloseToTray = true, bool StartInTray = false,
-    bool AutoUpdate = false)
+    bool AutoUpdate = false, Shortcut? SleepShortcut = null, Shortcut? HdrShortcut = null,
+    Shortcut? GamepadShortcut = null, string? HdrTarget = null, ulong GamepadTarget = 0,
+    RestPreset[]? Presets = null)
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "DisplayRest";
@@ -100,10 +107,57 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
 
         var settings = JsonSerializer.Deserialize(File.ReadAllText(SettingsFile), SettingsJson.Default.UserSettings) ??
             throw new InvalidDataException("Файл параметров пуст.");
-        if (settings.Shortcut is { IsValid: false } ||
+        if (settings.Bindings().Any(binding => !binding.Key.IsValid) ||
             (settings.Shortcut is null && !settings.WakeByMouse && !settings.WakeByKeyboard))
             throw new InvalidDataException("В файле параметров указана недопустимая комбинация пробуждения.");
+        if (settings.PresetList.Length > RestPreset.Limit ||
+            settings.PresetList.Any(preset => preset is null || !preset.IsValid()) ||
+            settings.PresetList.Select(preset => preset.Id).Distinct().Count() != settings.PresetList.Length ||
+            settings.Bindings().GroupBy(binding => binding.Key).Any(group => group.Count() > 1))
+            throw new InvalidDataException("Файл параметров содержит недопустимый пресет или повторяющуюся горячую клавишу.");
         return Enum.IsDefined(settings.Language) ? settings : settings with { Language = LanguagePreference.System };
+    }
+
+    [JsonIgnore]
+    internal RestPreset[] PresetList => Presets ?? [];
+
+    internal RestPreset? FindPreset(Guid id) => Array.Find(PresetList, preset => preset.Id == id);
+
+    internal Shortcut? ShortcutFor(CommandTarget target) => target switch
+    {
+        CommandTarget.Displays => Shortcut,
+        CommandTarget.Sleep => SleepShortcut,
+        CommandTarget.Hdr => HdrShortcut,
+        CommandTarget.Gamepads => GamepadShortcut,
+        _ => null
+    };
+
+    internal UserSettings SetShortcut(CommandTarget target, Shortcut? key) => target switch
+    {
+        CommandTarget.Displays => this with { Shortcut = key },
+        CommandTarget.Sleep => this with { SleepShortcut = key },
+        CommandTarget.Hdr => this with { HdrShortcut = key },
+        CommandTarget.Gamepads => this with { GamepadShortcut = key },
+        _ => throw new ArgumentOutOfRangeException(nameof(target))
+    };
+
+    internal IEnumerable<(Shortcut Key, CommandId Command)> Bindings()
+    {
+        if (Shortcut is { } displays) yield return (displays, new(CommandTarget.Displays));
+        if (SleepShortcut is { } sleep) yield return (sleep, new(CommandTarget.Sleep));
+        if (HdrShortcut is { } hdr) yield return (hdr, new(CommandTarget.Hdr));
+        if (GamepadShortcut is { } gamepad) yield return (gamepad, new(CommandTarget.Gamepads));
+        foreach (var preset in PresetList)
+            if (preset?.Shortcut is { } key)
+                yield return (key, new(CommandTarget.Preset, preset.Id));
+    }
+
+    internal CommandId? Conflict(Shortcut key, CommandId owner)
+    {
+        foreach (var (bound, command) in Bindings())
+            if (bound == key && command != owner)
+                return command;
+        return null;
     }
 
     internal void Save()

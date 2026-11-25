@@ -22,10 +22,12 @@ internal static class HotkeyRegistration
         if (shortcut.Modifiers.HasFlag(Modifiers.Win)) flags |= 0x0008;
 
         var status = Probe(window, flags, (uint)shortcut.Key);
-        if (shortcut.Key != Shortcut.Pause || !shortcut.Modifiers.HasFlag(Modifiers.Ctrl) || status == HotkeyCheck.InUse)
+        if (shortcut.Key is not (Shortcut.Pause or Shortcut.ScrollLock) ||
+            !shortcut.Modifiers.HasFlag(Modifiers.Ctrl) || status == HotkeyCheck.InUse)
             return status;
 
-        var breakStatus = Probe(window, flags, 0x03); // Ctrl+Pause may arrive as VK_CANCEL.
+        // RegisterHotKey is virtual-key based and cannot distinguish the two VK_CANCEL inputs.
+        var breakStatus = Probe(window, flags, Shortcut.ControlBreak);
         return breakStatus == HotkeyCheck.InUse ? breakStatus :
             status == HotkeyCheck.Available && breakStatus == HotkeyCheck.Available ? status : HotkeyCheck.Unavailable;
     }
