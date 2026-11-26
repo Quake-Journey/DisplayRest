@@ -26,6 +26,7 @@ internal sealed class DisplayControl : IDisposable
     private readonly InputHook _mouseHook;
     private nint _window;
     private bool _sleepPending;
+    private bool _sleepAfterModifiers;
     private UserSettings _settings;
     private Dictionary<Shortcut, CommandId> _bindings;
     private GamepadInput? _gamepads;
@@ -101,7 +102,7 @@ internal sealed class DisplayControl : IDisposable
         _gamepads.Reset(_captureWindow != 0);
     }
 
-    internal void Toggle() => Post(ToggleDisplays);
+    internal void Toggle() => Post(() => ToggleDisplays(fromKeyboard: false));
 
     internal Task TurnOffForPreset()
     {
@@ -219,18 +220,23 @@ internal sealed class DisplayControl : IDisposable
 
     private bool IsOff => _off || Environment.TickCount64 < _offRequestedUntil;
 
-    private void ToggleDisplays()
+    private void ToggleDisplays(bool fromKeyboard)
     {
         if (IsOff)
             Wake();
-        else if (_sleepPending)
+        else if (_sleepPending || _sleepAfterModifiers)
             CancelSleep();
+        else if (fromKeyboard && HasForwardedModifiers())
+            _sleepAfterModifiers = true;
         else
-            _sleepPending = SetTimer(_window, 1, 550) != 0;
+            ScheduleSleep();
     }
+
+    private void ScheduleSleep() => _sleepPending = SetTimer(_window, 1, 550) != 0;
 
     private void CancelSleep()
     {
+        _sleepAfterModifiers = false;
         if (!_sleepPending)
             return;
         KillTimer(_window, 1);
@@ -303,14 +309,14 @@ internal sealed class DisplayControl : IDisposable
         _postToUi(() => ShortcutCaptured?.Invoke(shortcut, id));
     }
 
-    private void RunShortcut(CommandId command, long now)
+    private void RunShortcut(CommandId command, long now, bool fromKeyboard = false)
     {
         if (command.Target != CommandTarget.Displays)
             _postToUi(() => CommandPressed?.Invoke(command));
         else if (IsOff)
             QueueWake();
         else if (now >= _ignoreToggleUntil)
-            Toggle();
+            Post(() => ToggleDisplays(fromKeyboard));
     }
 
     private nint KeyboardInput(int code, nint wParam, nint lParam)
@@ -383,7 +389,7 @@ internal sealed class DisplayControl : IDisposable
         }
         else if (chord is { } && _bindings.TryGetValue(chord, out var command))
         {
-            RunShortcut(command, now);
+            RunShortcut(command, now, fromKeyboard: true);
             block = true;
         }
         else if (IsOff)
@@ -401,6 +407,12 @@ internal sealed class DisplayControl : IDisposable
         if (!down)
         {
             _forwardedKeys.Remove(key);
+            if (_sleepAfterModifiers && isModifier && !HasForwardedModifiers())
+            {
+                // A modifier release passed to Windows can wake the displays by itself.
+                _sleepAfterModifiers = false;
+                ScheduleSleep();
+            }
             return wasPressed ? !forwarded : block;
         }
         if (wasPressed)
@@ -416,6 +428,14 @@ internal sealed class DisplayControl : IDisposable
         foreach (int modifier in _modifiers)
             result |= Shortcut.ModifierFor(modifier);
         return result;
+    }
+
+    private bool HasForwardedModifiers()
+    {
+        foreach (int key in _modifiers)
+            if (_forwardedKeys.TryGetValue(key, out bool forwarded) && forwarded)
+                return true;
+        return false;
     }
 
     private nint MouseInput(int code, nint wParam, nint lParam)
