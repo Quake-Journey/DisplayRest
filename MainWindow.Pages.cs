@@ -355,9 +355,15 @@ internal sealed partial class MainWindow
         }
         else if (!Save(_settings.SetShortcut(target, shortcut)))
             return;
-        SetStatus(result == HotkeyCheck.Available ? "HotkeyAvailable" :
-            target == CommandTarget.Preset ? "HotkeyDraftUnverified" : "HotkeyUnverified");
+        SetStatus(ShortcutStatusKey(result, target == CommandTarget.Preset));
     }
+
+    private static string ShortcutStatusKey(HotkeyCheck result, bool draft = false) => result switch
+    {
+        HotkeyCheck.Available => "HotkeyAvailable",
+        HotkeyCheck.Gamepad => draft ? "GamepadDraft" : "GamepadAssigned",
+        _ => draft ? "HotkeyDraftUnverified" : "HotkeyUnverified"
+    };
 
     private void RenderActionShortcuts()
     {

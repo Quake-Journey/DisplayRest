@@ -19,13 +19,18 @@ internal enum Modifiers
     Win = 8
 }
 
-internal sealed record Shortcut(int Key, Modifiers Modifiers)
+internal sealed record Shortcut(int Key, Modifiers Modifiers,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] GamepadButtons Gamepad = GamepadButtons.None)
 {
     internal const int Pause = 0x13;
     internal const int ScrollLock = 0x91;
     internal const int ControlBreak = 0x03;
 
-    internal bool IsValid => Key is >= 0 and <= 254 &&
+    internal bool IsGamepad => Gamepad != GamepadButtons.None;
+
+    internal bool IsValid => IsGamepad
+        ? Key == 0 && Modifiers == Modifiers.None && (Gamepad & ~GamepadButtons.Supported) == 0
+        : Key is >= 0 and <= 254 &&
         (Key != 0 || Modifiers != Modifiers.None) &&
         (Modifiers & ~(Modifiers.Ctrl | Modifiers.Shift | Modifiers.Alt | Modifiers.Win)) == 0;
 
@@ -42,6 +47,9 @@ internal sealed record Shortcut(int Key, Modifiers Modifiers)
 
     public override string ToString()
     {
+        if (IsGamepad)
+            return GamepadLabels.Format(Gamepad);
+
         var keys = new List<string>();
         if (Modifiers.HasFlag(Modifiers.Ctrl)) keys.Add("Ctrl");
         if (Modifiers.HasFlag(Modifiers.Shift)) keys.Add("Shift");

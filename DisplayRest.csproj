@@ -13,7 +13,7 @@
     <AssemblyName>PCRest</AssemblyName>
     <AssemblyTitle>PC Rest</AssemblyTitle>
     <Product>DisplayRest</Product>
-    <Version>1.2</Version>
+    <Version>1.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Description>PC Rest — дисплеи, сон компьютера и пресеты Windows</Description>
   </PropertyGroup>

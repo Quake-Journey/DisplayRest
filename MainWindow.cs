@@ -309,7 +309,7 @@ internal sealed partial class MainWindow : IDisposable
         if (result == HotkeyCheck.InUse)
             _shortcutStatus = new("HotkeyBusy", true, shortcut);
         else if (Save(_settings with { Shortcut = shortcut }))
-            _shortcutStatus = new(result == HotkeyCheck.Available ? "HotkeyAvailable" : "HotkeyUnverified");
+            _shortcutStatus = new(ShortcutStatusKey(result));
         RenderShortcut();
     }
 

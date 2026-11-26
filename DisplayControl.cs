@@ -28,6 +28,8 @@ internal sealed class DisplayControl : IDisposable
     private bool _sleepPending;
     private UserSettings _settings;
     private Dictionary<Shortcut, CommandId> _bindings;
+    private GamepadInput? _gamepads;
+    private GamepadButtons[] _gamepadBindings = [];
     private nint _captureWindow;
     private long _captureId;
     private bool _modifierOnly;
@@ -60,14 +62,44 @@ internal sealed class DisplayControl : IDisposable
     internal void Update(UserSettings settings)
     {
         var bindings = Bindings(settings);
-        Post(() => { _settings = settings; _bindings = bindings; });
+        Post(() =>
+        {
+            var previous = _bindings;
+            _settings = settings;
+            _bindings = bindings;
+            if (previous.Count != bindings.Count || previous.Any(entry =>
+                !bindings.TryGetValue(entry.Key, out var command) || command != entry.Value))
+                ConfigureGamepads();
+        });
     }
 
     private static Dictionary<Shortcut, CommandId> Bindings(UserSettings settings) =>
         settings.Bindings().ToDictionary(binding => binding.Key, binding => binding.Command);
 
     internal void Capture(nint window, long id = 0) =>
-        Post(() => { _captureWindow = window; _captureId = id; });
+        Post(() => SetCapture(window, id));
+
+    private void SetCapture(nint window, long id)
+    {
+        if (_captureWindow == window && _captureId == id)
+            return;
+        _captureWindow = window;
+        _captureId = id;
+        ConfigureGamepads();
+    }
+
+    private void ConfigureGamepads()
+    {
+        _gamepadBindings = _bindings.Keys.Where(key => key.IsGamepad).Select(key => key.Gamepad).ToArray();
+        if (_captureWindow == 0 && _gamepadBindings.Length == 0)
+        {
+            _gamepads?.Dispose();
+            _gamepads = null;
+            return;
+        }
+        _gamepads ??= new GamepadInput(_window, GamepadSample);
+        _gamepads.Reset(_captureWindow != 0);
+    }
 
     internal void Toggle() => Post(ToggleDisplays);
 
@@ -113,6 +145,7 @@ internal sealed class DisplayControl : IDisposable
                 _modifiers.Add(modifier);
                 _forwardedKeys[modifier] = true;
             }
+            ConfigureGamepads();
             started.SetResult();
             NativeWindow.Pump();
         }
@@ -123,6 +156,7 @@ internal sealed class DisplayControl : IDisposable
         }
         finally
         {
+            _gamepads?.Dispose();
             if (mouse != 0) UnhookWindowsHookEx(mouse);
             if (keyboard != 0) UnhookWindowsHookEx(keyboard);
             if (notification != 0) UnregisterPowerSettingNotification(notification);
@@ -152,6 +186,16 @@ internal sealed class DisplayControl : IDisposable
                 if (_sleepPending)
                     TurnOff();
                 return 0;
+            case TimerMessage when wParam == GamepadInput.Timer:
+                _gamepads?.Poll();
+                return 0;
+            case RawGamepadInput.InputMessage:
+                _gamepads?.ReceiveRaw(lParam);
+                return null; // DefWindowProc cleans up foreground raw input.
+            case RawGamepadInput.DeviceChangeMessage:
+                if (wParam == 2) // GIDC_REMOVAL
+                    _gamepads?.Forget(lParam);
+                return null;
         }
         if (msg != PowerBroadcast || wParam != PowerSettingChange || lParam == 0 ||
             Marshal.PtrToStructure<Guid>(lParam) != SessionDisplayStatus || Marshal.ReadInt32(lParam, 16) != sizeof(int))
@@ -234,6 +278,41 @@ internal sealed class DisplayControl : IDisposable
         PostMessage(_window, WakeDisplays);
     }
 
+    private void GamepadSample(GamepadGesture gesture, GamepadButtons buttons)
+    {
+        bool capturing = _captureWindow != 0;
+        if (capturing && _captureWindow != GetForegroundWindow())
+        {
+            gesture.Synchronize(buttons);
+            return;
+        }
+        var chord = gesture.Update(buttons, capturing, _gamepadBindings);
+        if (chord == GamepadButtons.None)
+            return;
+        var shortcut = new Shortcut(0, Modifiers.None, chord);
+        if (capturing)
+            CompleteCapture(shortcut);
+        else if (_bindings.TryGetValue(shortcut, out var command))
+            RunShortcut(command, Environment.TickCount64);
+    }
+
+    private void CompleteCapture(Shortcut shortcut)
+    {
+        long id = _captureId;
+        SetCapture(0, 0);
+        _postToUi(() => ShortcutCaptured?.Invoke(shortcut, id));
+    }
+
+    private void RunShortcut(CommandId command, long now)
+    {
+        if (command.Target != CommandTarget.Displays)
+            _postToUi(() => CommandPressed?.Invoke(command));
+        else if (IsOff)
+            QueueWake();
+        else if (now >= _ignoreToggleUntil)
+            Toggle();
+    }
+
     private nint KeyboardInput(int code, nint wParam, nint lParam)
     {
         if (code == 0)
@@ -299,23 +378,12 @@ internal sealed class DisplayControl : IDisposable
         bool block;
         if (chord is { IsValid: true } && _captureWindow != 0 && _captureWindow == GetForegroundWindow())
         {
-            _captureWindow = 0;
-            var captured = chord;
-            long id = _captureId;
-            _postToUi(() => ShortcutCaptured?.Invoke(captured, id));
+            CompleteCapture(chord);
             block = true;
         }
         else if (chord is { } && _bindings.TryGetValue(chord, out var command))
         {
-            if (command.Target == CommandTarget.Displays)
-            {
-                if (IsOff)
-                    QueueWake();
-                else if (now >= _ignoreToggleUntil)
-                    Toggle();
-            }
-            else
-                _postToUi(() => CommandPressed?.Invoke(command));
+            RunShortcut(command, now);
             block = true;
         }
         else if (IsOff)

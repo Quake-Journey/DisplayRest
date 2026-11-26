@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace DisplayRest;
 
-internal enum HotkeyCheck { Available, InUse, Unavailable }
+internal enum HotkeyCheck { Available, InUse, Unavailable, Gamepad }
 
 internal static class HotkeyRegistration
 {
@@ -11,6 +11,9 @@ internal static class HotkeyRegistration
 
     internal static HotkeyCheck Check(nint window, Shortcut shortcut)
     {
+        if (shortcut.IsGamepad)
+            return HotkeyCheck.Gamepad;
+
         // RegisterHotKey expects a main key and reserves F12 for the debugger.
         if (shortcut.Key is 0 or 0x7B)
             return HotkeyCheck.Unavailable;

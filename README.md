@@ -10,6 +10,8 @@ PC Rest управляет дисплеями, системным сном и Bl
 
 PC Rest проверяет конфликты со своими действиями, пресетами и глобальными регистрациями Windows. Для `F12` и сочетаний только из модификаторов Windows не предоставляет проверку регистрации. Отдельные приложения могут обрабатывать клавиши напрямую. [Документация RegisterHotKey](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-registerhotkey).
 
+На любом действии или пресете нажми «Назначить», удержи нужные кнопки одного геймпада и отпусти их. Например, `D-pad ↓ + Start` (`Options` на DualShock и DualSense) можно назначить на «Отключить геймпады». В строке хранится одно назначение. Геймпад работает и в трее. PC Rest проверяет совпадения между своими назначениями, а игры могут одновременно получать те же кнопки. [Raw Input](https://learn.microsoft.com/en-us/windows/win32/inputdev/raw-input), [XInput](https://learn.microsoft.com/en-us/windows/win32/xinput/getting-started-with-xinput).
+
 ## Сборка / Build
 
 Понадобятся Windows x64, .NET SDK 10 и инструменты Visual Studio 2022 с компонентом «Разработка классических приложений на C++». Готовый Native AOT EXE запускается без установки.
@@ -25,3 +27,5 @@ dotnet publish -c Release -o release
 ## English
 
 PC Rest controls display power and HDR, puts the PC into Windows sleep, and disconnects recognized Bluetooth Classic gamepads. Combine actions into up to 10 named presets with optional hotkeys or run them from the tray menu. It keeps your existing DisplayRest settings. English and Russian are available. [Windows x64 releases](https://github.com/Quake-Journey/DisplayRest/releases).
+
+Any action or preset can use a keyboard shortcut or buttons from one gamepad. Select **Assign**, hold the buttons together, then release. For example, assign `D-pad ↓ + Start` (`Options` on PlayStation controllers) to **Disconnect gamepads**. Gamepad shortcuts work from the tray and are checked for duplicates within PC Rest. Other apps can still receive the same controller input.
