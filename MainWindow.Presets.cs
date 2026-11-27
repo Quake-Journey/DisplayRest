@@ -10,7 +10,7 @@ internal sealed partial class MainWindow
     [
         (Control.PresetDisplays, RestAction.Displays), (Control.PresetSleep, RestAction.Sleep),
         (Control.PresetHdr, RestAction.Hdr), (Control.PresetGamepads, RestAction.Gamepads),
-        (Control.PresetLock, RestAction.Lock)
+        (Control.PresetLock, RestAction.Lock), (Control.PresetBlack, RestAction.BlackScreen)
     ];
 
     private Guid _editingPreset;
@@ -37,8 +37,9 @@ internal sealed partial class MainWindow
         CheckBox(Control.PresetGamepads, 325, 426, 282, Panel);
         CheckBox(Control.PresetLock, 40, 453, 278, Panel);
         AddCombo(Control.PresetHdrMode, 325, 453, 282);
-        AddShortcutRow(Control.PresetKey, Control.PresetCapture, Control.PresetClear, 485);
-        Label(Control.PresetHint, 40, 530, 570, 53, Muted, _small, Panel, wrap: true);
+        CheckBox(Control.PresetBlack, 40, 481, 278, Panel);
+        AddShortcutRow(Control.PresetKey, Control.PresetCapture, Control.PresetClear, 516);
+        Label(Control.PresetHint, 40, 557, 570, 31, Muted, _small, Panel, wrap: true);
         Button(Control.PresetSave, 455, 591, 155);
     }
 
@@ -56,7 +57,7 @@ internal sealed partial class MainWindow
             (Control.PresetRun, "PresetRunTip"), (Control.PresetName, "PresetNameTip"), (Control.PresetDescription, "PresetDescriptionTip"),
             (Control.PresetHdrMode, "PresetHdrModeTip"), (Control.PresetSave, "PresetSaveTip"),
             (Control.PresetDisplays, "PresetDisplaysTip"), (Control.PresetSleep, "PcRunTip"), (Control.PresetHdr, "HdrPickTip"),
-            (Control.PresetGamepads, "GamepadPickTip"), (Control.PresetLock, "PresetLockTip"));
+            (Control.PresetGamepads, "GamepadPickTip"), (Control.PresetLock, "PresetLockTip"), (Control.PresetBlack, "PresetBlackTip"));
         int mode = Math.Max(0, ComboIndex(Control.PresetHdrMode));
         FillCombo(Control.PresetHdrMode, [UiText.Get("PresetHdrToggle"), UiText.Get("PresetHdrOn"), UiText.Get("PresetHdrOff")], mode);
         RenderPresetList();
@@ -180,7 +181,7 @@ internal sealed partial class MainWindow
         }
         if ((_presetEditor && id is Control.PresetName or Control.PresetDescription && notification == 0x0300) ||
             (_presetEditor && id == Control.PresetHdrMode && notification == 1) ||
-            (_presetEditor && notification == 0 && id is >= Control.PresetDisplays and <= Control.PresetLock))
+            (_presetEditor && notification == 0 && PresetActions.Any(item => item.Id == id)))
         {
             _presetDirty = true;
             RenderPresetButtons();

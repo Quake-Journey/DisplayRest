@@ -29,6 +29,7 @@ internal sealed class App
     private NativeWindow _host = null!;
     private DisplayControl _control = null!;
     private MainWindow? _window;
+    private BlackScreen? _blackScreen;
     private int _taskbarCreated;
     private bool _displaysOff;
     private bool _settingsError;
@@ -42,6 +43,8 @@ internal sealed class App
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args is ["--check-update"])
+            return UpdateWorker.Check();
         if (args.Length != 0 && args[0] == "--update-worker")
             return UpdateWorker.Run(Instance, args);
         if (args.Contains("--exit", StringComparer.OrdinalIgnoreCase))
@@ -94,6 +97,7 @@ internal sealed class App
             _control = control;
             _control.ShortcutCaptured += (shortcut, id) => _window?.AcceptShortcut(shortcut, id);
             _control.CommandPressed += command => Execute(command, confirm: false);
+            _control.BlackScreenDismissed += CloseBlackScreen;
             _control.DisplayChanged += off =>
             {
                 _displaysOff = off;
@@ -106,18 +110,20 @@ internal sealed class App
             var exitWait = ThreadPool.RegisterWaitForSingleObject(exit, (_, _) => Post(Exit), null, Timeout.Infinite, false);
             try
             {
+                ConfigureUpdateTimer();
                 if (!resume && !_settings.StartInTray)
                     OpenWindow();
-                ConfigureUpdateTimer();
                 if (resume)
                     SetTimer(_host.Handle, 3, 10000);
-                NativeWindow.Pump(() => _window?.Handle ?? 0, message => _window?.FilterMessage(message) == true);
+                NativeWindow.Pump(() => _blackScreen is null ? _window?.Handle ?? 0 : 0,
+                    message => _blackScreen is null && _window?.FilterMessage(message) == true);
             }
             finally
             {
                 exitWait.Unregister(null);
                 openWait.Unregister(null);
                 _updates?.Dispose();
+                CloseBlackScreen();
                 DestroySettingsWindow();
                 TrayIcon(2);
             }
@@ -154,8 +160,10 @@ internal sealed class App
                 Exit();
                 return 0;
             case TimerMessage when wParam == 2:
-                if (_updates is not null)
-                    SetTimer(window, 2, _updates.CheckWhenIdle());
+                // A manual offer runs a modal message loop. Do not re-enter the scheduler.
+                KillTimer(window, 2);
+                if (_updates?.Poll() is uint delay && delay != 0 && !_exitRequested)
+                    SetTimer(window, 2, delay);
                 return 0;
             case TimerMessage when wParam == 3:
                 KillTimer(window, 3);
@@ -208,7 +216,21 @@ internal sealed class App
 
     private void Execute(CommandId command, bool confirm)
     {
-        if (_runningActions || _exitRequested)
+        if (_exitRequested)
+            return;
+        if (command.Target == CommandTarget.BlackScreen ||
+            (command.Target == CommandTarget.Preset && _settings.FindPreset(command.Preset)?.Actions == RestAction.BlackScreen))
+        {
+            if (_blackScreen is not null)
+                CloseBlackScreen();
+            else
+            {
+                try { ShowBlackScreen(); }
+                catch (Win32Exception error) { ShowActionFailure(UiText.Get("ActionNativeError", error.NativeErrorCode)); }
+            }
+            return;
+        }
+        if (_runningActions)
             return;
         if (command.Target == CommandTarget.Displays)
         {
@@ -246,6 +268,7 @@ internal sealed class App
                     {
                         case RestAction.Gamepads: BluetoothGamepads.Disconnect(settings.GamepadTarget); break;
                         case RestAction.Hdr: HdrDisplays.Set(settings.HdrTarget, request.HdrMode); break;
+                        case RestAction.BlackScreen: await ShowBlackScreenForPreset().ConfigureAwait(false); break;
                         case RestAction.Lock: PcPower.Lock(); break;
                         case RestAction.Displays: await _control.TurnOffForPreset().ConfigureAwait(false); break;
                         case RestAction.Sleep: PcPower.Sleep(); break;
@@ -275,8 +298,33 @@ internal sealed class App
         RestAction.Hdr => "Hdr",
         RestAction.Gamepads => "GamepadDisconnect",
         RestAction.Lock => "PresetLock",
+        RestAction.BlackScreen => "BlackScreen",
         _ => "PresetDisplays"
     };
+
+    private void ShowBlackScreen()
+    {
+        _blackScreen ??= new BlackScreen(() => Post(CloseBlackScreen));
+        _control.BlackScreenVisible = true;
+    }
+
+    private Task ShowBlackScreenForPreset()
+    {
+        var shown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Post(() =>
+        {
+            try { ShowBlackScreen(); shown.SetResult(); }
+            catch (Win32Exception error) { shown.SetException(error); }
+        });
+        return shown.Task;
+    }
+
+    private void CloseBlackScreen()
+    {
+        _control.BlackScreenVisible = false;
+        _blackScreen?.Dispose();
+        _blackScreen = null;
+    }
 
     private void TrayMenu()
     {
@@ -318,8 +366,10 @@ internal sealed class App
         try
         {
             _window ??= new MainWindow(_control, _settings, _displaysOff, _settingsError, UpdateSettings,
-                Execute,
+                Execute, CheckUpdates,
                 minimize: DestroySettingsWindow, close: CloseSettingsWindow, exit: Exit);
+            if (_updates is not null)
+                _window.ShowUpdateStatus(_updates.Status);
             ApplyTaskbarMenu();
             _window.Show();
         }
@@ -344,24 +394,38 @@ internal sealed class App
 
     private void ConfigureUpdateTimer()
     {
-        if (_settings.AutoUpdate)
-        {
-            _updates ??= new AutomaticUpdate(Instance, Post,
-                () => _settings.AutoUpdate && !_exitRequested && !_runningActions && _window is null && !_displaysOff, Exit);
-            SetTimer(_host.Handle, 2, 15000);
-        }
-        else
-        {
-            KillTimer(_host.Handle, 2);
-            _updates?.Dispose();
-            _updates = null;
-        }
+        _updates ??= new AutomaticUpdate(Instance, Post, CanInstallUpdate, OfferUpdate,
+            status => _window?.ShowUpdateStatus(status), Exit);
+        _updates.Configure(_settings.AutoUpdate, _settings.UpdateIntervalHours);
+        SetTimer(_host.Handle, 2, 250);
+    }
+
+    private void CheckUpdates()
+    {
+        _updates!.CheckManually();
+        SetTimer(_host.Handle, 2, 250);
+    }
+
+    private bool CanInstallUpdate(bool manual) => !_exitRequested && !_runningActions && !_displaysOff &&
+        _blackScreen is null && (manual ? _window?.HasPendingEdits != true : _settings.AutoUpdate && _window is null);
+
+    private bool OfferUpdate(string version)
+    {
+        var window = _window;
+        if (window is null || _exitRequested || _displaysOff || _blackScreen is not null)
+            return false;
+        string prompt = window.HasPendingEdits ? "UpdateOfferDraft" : "UpdateOffer";
+        if (MessageBox(window.Handle, UiText.Get(prompt, version), Name, 0x124) != 6 || _window != window || _exitRequested)
+            return false;
+        if (window.HasPendingEdits)
+            DestroySettingsWindow();
+        return true;
     }
 
     private void UpdateSettings(UserSettings settings)
     {
         bool languageChanged = settings.Language != _settings.Language;
-        bool updatesChanged = settings.AutoUpdate != _settings.AutoUpdate;
+        bool updatesChanged = settings.AutoUpdate != _settings.AutoUpdate || settings.UpdateIntervalHours != _settings.UpdateIntervalHours;
         _settings = settings;
         _settingsError = false;
         _control.Update(settings);
@@ -393,6 +457,8 @@ internal sealed class App
         var window = _window;
         _window = null;
         window?.Dispose();
+        if (!_exitRequested && _updates?.WaitingToInstall == true)
+            SetTimer(_host.Handle, 2, 250);
     }
 
     private void Exit()

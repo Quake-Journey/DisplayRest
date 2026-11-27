@@ -100,7 +100,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
     LanguagePreference Language = LanguagePreference.System, bool CloseToTray = true, bool StartInTray = false,
     bool AutoUpdate = false, Shortcut? SleepShortcut = null, Shortcut? HdrShortcut = null,
     Shortcut? GamepadShortcut = null, string? HdrTarget = null, ulong GamepadTarget = 0,
-    RestPreset[]? Presets = null)
+    RestPreset[]? Presets = null, Shortcut? BlackScreenShortcut = null, int UpdateIntervalHours = 24)
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "DisplayRest";
@@ -123,6 +123,8 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
             settings.PresetList.Select(preset => preset.Id).Distinct().Count() != settings.PresetList.Length ||
             settings.Bindings().GroupBy(binding => binding.Key).Any(group => group.Count() > 1))
             throw new InvalidDataException("Файл параметров содержит недопустимый пресет или повторяющуюся горячую клавишу.");
+        if (settings.UpdateIntervalHours is not (1 or 12 or 24))
+            settings = settings with { UpdateIntervalHours = 24 };
         return Enum.IsDefined(settings.Language) ? settings : settings with { Language = LanguagePreference.System };
     }
 
@@ -137,6 +139,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
         CommandTarget.Sleep => SleepShortcut,
         CommandTarget.Hdr => HdrShortcut,
         CommandTarget.Gamepads => GamepadShortcut,
+        CommandTarget.BlackScreen => BlackScreenShortcut,
         _ => null
     };
 
@@ -146,6 +149,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
         CommandTarget.Sleep => this with { SleepShortcut = key },
         CommandTarget.Hdr => this with { HdrShortcut = key },
         CommandTarget.Gamepads => this with { GamepadShortcut = key },
+        CommandTarget.BlackScreen => this with { BlackScreenShortcut = key },
         _ => throw new ArgumentOutOfRangeException(nameof(target))
     };
 
@@ -155,6 +159,7 @@ internal sealed record UserSettings(Shortcut? Shortcut = null, bool WakeByMouse 
         if (SleepShortcut is { } sleep) yield return (sleep, new(CommandTarget.Sleep));
         if (HdrShortcut is { } hdr) yield return (hdr, new(CommandTarget.Hdr));
         if (GamepadShortcut is { } gamepad) yield return (gamepad, new(CommandTarget.Gamepads));
+        if (BlackScreenShortcut is { } black) yield return (black, new(CommandTarget.BlackScreen));
         foreach (var preset in PresetList)
             if (preset?.Shortcut is { } key)
                 yield return (key, new(CommandTarget.Preset, preset.Id));

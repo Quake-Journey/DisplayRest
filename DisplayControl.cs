@@ -45,6 +45,8 @@ internal sealed class DisplayControl : IDisposable
 
     internal event Action<Shortcut, long>? ShortcutCaptured;
     internal event Action<CommandId>? CommandPressed;
+    internal event Action? BlackScreenDismissed;
+    internal volatile bool BlackScreenVisible;
     internal event Action<bool>? DisplayChanged;
 
     internal DisplayControl(UserSettings settings, Action<Action> postToUi)
@@ -428,7 +430,13 @@ internal sealed class DisplayControl : IDisposable
         if (down && pause)
             _lastPause = now;
         bool block;
-        if (chord is { IsValid: true } && _captureWindow != 0 && _captureWindow == GetForegroundWindow())
+        if (BlackScreenVisible && !IsOff && key == 0x1B && mods == Modifiers.None)
+        {
+            if (down && !wasPressed)
+                _postToUi(() => BlackScreenDismissed?.Invoke());
+            block = true;
+        }
+        else if (chord is { IsValid: true } && _captureWindow != 0 && _captureWindow == GetForegroundWindow())
         {
             CompleteCapture(chord);
             block = true;

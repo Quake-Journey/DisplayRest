@@ -17,7 +17,7 @@ internal sealed partial class MainWindow : IDisposable
         Language = 100, LanguageLabel, Heading, Intro, HotkeyTitle, Shortcut, Capture, Clear, ShortcutHint,
         ShortcutStatus, WakeTitle, MouseWake, KeyboardWake, WakeHint, TimerTitle, Scheme, AcLabel, DcLabel,
         Ac, Dc, Apply, TimerUnits, TimerStatus, CloseToTray, StartInTray, Startup, ToggleDisplay, Status, AutoUpdate,
-        TabDisplays = 150, TabPc, TabGamepads, TabPresets, TabSettings,
+        TabDisplays = 150, TabPc, TabGamepads, TabPresets, TabSettings, TabSaver,
         HdrHeading = 160, HdrPick, HdrRefresh, HdrRun, HdrState, HdrKey, HdrCapture, HdrClear,
         PcHeading = 180, PcIntro, PcStatus, PcKey, PcCapture, PcClear, PcRun,
         GamepadHeading = 200, GamepadIntro, GamepadPick, GamepadRefresh, GamepadRun, GamepadState,
@@ -25,7 +25,9 @@ internal sealed partial class MainWindow : IDisposable
         PresetsHeading = 220, PresetCount, PresetPick, PresetNew, PresetDelete, PresetRun, PresetNameLabel, PresetName,
         PresetDescriptionLabel, PresetDescription, PresetActions, PresetDisplays, PresetSleep, PresetHdr, PresetGamepads,
         PresetLock, PresetHdrMode, PresetKey, PresetCapture, PresetClear, PresetSave, PresetHint,
-        SettingsHeading = 250, SettingsExit
+        SettingsHeading = 250, SettingsExit, UpdateIntervalLabel, UpdateInterval, CheckUpdates, UpdateState,
+        SaverHeading = 260, SaverTitle, SaverEnabled, SaverTimeLabel, SaverTime, SaverApply, SaverUnits,
+        BlackTitle, BlackRun, BlackHint, BlackKey, BlackCapture, BlackClear, PresetBlack
     }
 
     private sealed record Notice(string Key, bool Error = false, object? Detail = null);
@@ -40,6 +42,8 @@ internal sealed partial class MainWindow : IDisposable
     private readonly Action _minimize;
     private readonly Action _close;
     private readonly Action _exit;
+    private readonly Action _checkUpdates;
+    private UpdateStatus _updateStatus = new();
     private readonly NativeWindow _window;
     private readonly double _scale;
     private readonly Dictionary<Control, nint> _controls = new();
@@ -58,15 +62,17 @@ internal sealed partial class MainWindow : IDisposable
     private bool _startupOtherPath;
 
     internal nint Handle => _window.Handle;
+    internal bool HasPendingEdits => _presetDirty || _editingTimer || SaverTimeEdited || _capturing;
 
     internal MainWindow(DisplayControl control, UserSettings settings, bool displaysOff, bool settingsError,
-        Action<UserSettings> change, Action<CommandId, bool> execute, Action minimize, Action close, Action exit)
+        Action<UserSettings> change, Action<CommandId, bool> execute, Action checkUpdates, Action minimize, Action close, Action exit)
     {
         _control = control;
         _settings = settings;
         _displaysOff = displaysOff;
         _change = change;
         _execute = execute;
+        _checkUpdates = checkUpdates;
         _minimize = minimize;
         _close = close;
         _exit = exit;
@@ -156,6 +162,7 @@ internal sealed partial class MainWindow : IDisposable
         Label(Control.TimerUnits, 40, 460, 570, 17, Muted, _small, Panel);
         Label(Control.TimerStatus, 40, 478, 570, 30, Muted, _small, Panel, wrap: true);
         CreateHdrControls();
+        CreateSaverControls();
         CreatePcControls();
         CreateGamepadControls();
         CreatePresetControls();
@@ -171,6 +178,12 @@ internal sealed partial class MainWindow : IDisposable
 
     internal bool FilterMessage(Message message)
     {
+        if (message.Id == KeyDown && message.WParam == 0x0D && message.Window == _controls[Control.SaverTime])
+        {
+            if (SaverTimeEdited)
+                ApplySaverTimeout();
+            return true;
+        }
         if (message.Id != KeyDown || message.WParam != 0x0D || !_editingTimer ||
             (message.Window != _controls[Control.Ac] && message.Window != _controls[Control.Dc]))
             return false;
@@ -227,6 +240,12 @@ internal sealed partial class MainWindow : IDisposable
                 {
                     RefreshPage();
                 }
+                return 0;
+            case 0x001A when _initialized && _page == Page.Saver: // WM_SETTINGCHANGE
+                PostMessage(window, AppMessage + 10);
+                return 0;
+            case AppMessage + 10 when _page == Page.Saver:
+                RefreshSaver();
                 return 0;
             case SystemCommand when ((uint)wParam & 0xFFF0) == 0xF020: // SC_MINIMIZE
                 if (ConfirmDiscardDraft())
@@ -394,6 +413,8 @@ internal sealed partial class MainWindow : IDisposable
         Check(Control.CloseToTray, _settings.CloseToTray);
         Check(Control.StartInTray, _settings.StartInTray);
         Check(Control.AutoUpdate, _settings.AutoUpdate);
+        SendMessage(_controls[Control.UpdateInterval], ComboSelect, Array.IndexOf(UpdateHours, _settings.UpdateIntervalHours));
+        EnableWindow(_controls[Control.UpdateInterval], _settings.AutoUpdate);
         Check(Control.MouseWake, _settings.WakeByMouse);
         Check(Control.KeyboardWake, _settings.WakeByKeyboard);
     }

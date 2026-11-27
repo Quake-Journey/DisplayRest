@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 
 namespace DisplayRest;
 
@@ -19,10 +20,49 @@ internal static class UpdateWorker
     private const int Limit = 100 * 1024 * 1024;
 
     private sealed record ReleaseAsset(Version Version, Uri Url, long Size, byte[] Digest);
+    private sealed class ParentExitSignal : WaitHandle
+    {
+        internal ParentExitSignal(Process parent) => SafeWaitHandle = new SafeWaitHandle(parent.Handle, ownsHandle: false);
+    }
+
+    internal const int ReleaseChanged = 2, InstallDeferred = 3;
+
+    internal static int Check()
+    {
+        try
+        {
+            if (!TryVersion(FileVersionInfo.GetVersionInfo(Environment.ProcessPath!).ProductVersion, out var current))
+                return 1;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var http = CreateClient(current);
+            var asset = ReadLatest(http, current, timeout.Token).GetAwaiter().GetResult();
+            if (asset is not null)
+            {
+                var version = asset.Version;
+                Console.WriteLine(version.ToString(version.Revision > 0 ? 4 : version.Build > 0 ? 3 : 2));
+            }
+            return 0;
+        }
+        catch (Exception error) when (IsUpdateError(error)) { return 1; }
+    }
+
+    private static HttpClient CreateClient(Version current)
+    {
+        var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+        {
+            MaxResponseContentBufferSize = 2 * 1024 * 1024
+        };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd($"PCRest/{current.Major}.{current.Minor}");
+        return http;
+    }
+
+    private static bool IsUpdateError(Exception error) => error is IOException or InvalidDataException or UnauthorizedAccessException or Win32Exception or
+        HttpRequestException or OperationCanceledException or JsonException or FormatException or InvalidOperationException or
+        ArgumentException or CryptographicException or System.Collections.Generic.KeyNotFoundException or System.Security.SecurityException;
 
     internal static int Run(string instance, string[] args)
     {
-        if (args.Length != 3 || !int.TryParse(args[1], out var owner) ||
+        if (args.Length != 4 || !TryVersion(args[3], out var expected) || !int.TryParse(args[1], out var owner) ||
             !Guid.TryParseExact(args[2], "N", out _) ||
             !EventWaitHandle.TryOpenExisting(AutomaticUpdate.RequestName(instance, args[2]), out var request))
             return 1;
@@ -40,40 +80,41 @@ internal static class UpdateWorker
                     if (target is null || parent.HasExited || !TryVersion(FileVersionInfo.GetVersionInfo(target).ProductVersion, out var current))
                         return 1;
                     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-                    using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
-                    {
-                        MaxResponseContentBufferSize = 2 * 1024 * 1024
-                    };
-                    http.DefaultRequestHeaders.UserAgent.ParseAdd($"PCRest/{current.Major}.{current.Minor}");
+                    using var http = CreateClient(current);
                     var asset = ReadLatest(http, current, timeout.Token).GetAwaiter().GetResult();
-                    if (asset is null || parent.HasExited)
-                        return 0;
+                    if (asset is null || asset.Version != expected)
+                        return ReleaseChanged;
+                    if (parent.HasExited)
+                        return InstallDeferred;
                     var stage = target + "." + args[2] + ".new";
                     try
                     {
                         Download(http, asset, stage, timeout.Token).GetAwaiter().GetResult();
                         if (parent.HasExited)
-                            return 0;
+                            return InstallDeferred;
 
                         using var installing = new EventWaitHandle(false, EventResetMode.ManualReset,
                             AutomaticUpdate.InstallName(instance), out bool isNew);
                         if (!isNew)
-                            return 0;
+                            return InstallDeferred;
                         try
                         {
+                            if (!EventWaitHandle.TryOpenExisting(AutomaticUpdate.DeferredName(instance, args[2]), out var deferred))
+                                return InstallDeferred;
+                            using var declined = deferred;
+                            using var parentExit = new ParentExitSignal(parent);
                             request.Set();
-                            if (!approval.WaitOne(4500) || !parent.WaitForExit(5000))
-                                return 0;
+                            // An occupied UI thread may take time to answer. A late approval must still have a waiting installer.
+                            if (WaitHandle.WaitAny([approval, declined, parentExit]) != 0)
+                                return InstallDeferred;
+                            parent.WaitForExit();
                             return Install(stage, target, args[2]) ? 0 : 1;
                         }
                         finally { installing.Set(); }
                     }
                     finally { AutomaticUpdate.TryDelete(stage); }
                 }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException or Win32Exception or
-                    HttpRequestException or OperationCanceledException or JsonException or FormatException or
-                    InvalidOperationException or ArgumentException or CryptographicException or
-                    System.Collections.Generic.KeyNotFoundException or System.Security.SecurityException)
+                catch (Exception error) when (IsUpdateError(error))
                 {
                     return 1;
                 }
@@ -97,7 +138,8 @@ internal static class UpdateWorker
             return null;
 
         var assets = release.GetProperty("assets");
-        return FindAsset(assets, tag, next, AssetName) ?? FindAsset(assets, tag, next, LegacyAssetName);
+        return FindAsset(assets, tag, next, AssetName) ?? FindAsset(assets, tag, next, LegacyAssetName) ??
+            throw new InvalidDataException("The newer release has no compatible, verifiable executable.");
     }
 
     private static ReleaseAsset? FindAsset(JsonElement assets, string tag, Version version, string name)

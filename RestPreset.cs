@@ -4,9 +4,9 @@ using System.Collections.Generic;
 namespace DisplayRest;
 
 [Flags]
-internal enum RestAction { None = 0, Displays = 1, Sleep = 2, Hdr = 4, Gamepads = 8, Lock = 16 }
+internal enum RestAction { None = 0, Displays = 1, Sleep = 2, Hdr = 4, Gamepads = 8, Lock = 16, BlackScreen = 32 }
 internal enum HdrMode { Toggle, On, Off }
-internal enum CommandTarget { Displays, Sleep, Hdr, Gamepads, Preset }
+internal enum CommandTarget { Displays, Sleep, Hdr, Gamepads, Preset, BlackScreen }
 
 internal readonly record struct CommandId(CommandTarget Target, Guid Preset = default)
 {
@@ -16,6 +16,7 @@ internal readonly record struct CommandId(CommandTarget Target, Guid Preset = de
         CommandTarget.Sleep => UiText.Get("PcSleep"),
         CommandTarget.Hdr => "HDR",
         CommandTarget.Gamepads => UiText.Get("GamepadDisconnect"),
+        CommandTarget.BlackScreen => UiText.Get("BlackScreen"),
         _ => settings.FindPreset(Preset)?.Name ?? UiText.Get("TabPresets")
     };
 }
@@ -25,7 +26,7 @@ internal sealed record RestPreset(Guid Id, string Name, string Description, Rest
     internal const int Limit = 10;
     internal const int MaxName = 48;
     internal const int MaxDescription = 240;
-    private const RestAction All = RestAction.Displays | RestAction.Sleep | RestAction.Hdr | RestAction.Gamepads | RestAction.Lock;
+    private const RestAction All = RestAction.Displays | RestAction.Sleep | RestAction.Hdr | RestAction.Gamepads | RestAction.Lock | RestAction.BlackScreen;
 
     internal bool IsValid() => Id != Guid.Empty && !string.IsNullOrWhiteSpace(Name) && Name.Length <= MaxName &&
         Description is { Length: <= MaxDescription } && Actions != RestAction.None && (Actions & ~All) == 0 &&
@@ -34,7 +35,7 @@ internal sealed record RestPreset(Guid Id, string Name, string Description, Rest
 
 internal sealed record RestRequest(RestAction Actions, HdrMode HdrMode = HdrMode.Toggle)
 {
-    private static readonly RestAction[] Order = [RestAction.Gamepads, RestAction.Hdr, RestAction.Lock, RestAction.Displays, RestAction.Sleep];
+    private static readonly RestAction[] Order = [RestAction.Gamepads, RestAction.Hdr, RestAction.BlackScreen, RestAction.Lock, RestAction.Displays, RestAction.Sleep];
 
     internal IEnumerable<RestAction> Steps()
     {

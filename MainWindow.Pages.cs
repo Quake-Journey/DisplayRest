@@ -8,11 +8,12 @@ namespace DisplayRest;
 
 internal sealed partial class MainWindow
 {
-    private enum Page { Displays, Pc, Gamepads, Presets, Settings }
-    private static readonly string[] PageKeys = ["TabDisplays", "TabPc", "TabGamepads", "TabPresets", "TabSettings"];
+    private enum Page { Displays, Pc, Gamepads, Presets, Settings, Saver }
+    private static readonly string[] PageKeys = ["TabDisplays", "TabPc", "TabGamepads", "TabPresets", "TabSettings", "TabSaver"];
     private readonly Dictionary<Control, Page> _controlPages = new();
     private Page? _buildingPage;
     private Page _page;
+    private static readonly int[] UpdateHours = [1, 12, 24];
     private CommandTarget _captureTarget;
     private static long _lastCaptureId;
     private long _captureId;
@@ -23,8 +24,9 @@ internal sealed partial class MainWindow
 
     private void CreateNavigation()
     {
-        for (int i = 0; i < PageKeys.Length; i++)
-            Button(TabControl((Page)i), 22 + 123 * i, 55, 116);
+        Page[] order = [Page.Displays, Page.Saver, Page.Pc, Page.Gamepads, Page.Presets, Page.Settings];
+        for (int i = 0; i < order.Length; i++)
+            Button(TabControl(order[i]), 22 + 102 * i, 55, 98);
     }
 
     private void CreateHdrControls()
@@ -67,7 +69,11 @@ internal sealed partial class MainWindow
         CheckBox(Control.StartInTray, 40, 203, 545, Panel);
         CheckBox(Control.Startup, 40, 241, 545, Panel);
         CheckBox(Control.AutoUpdate, 40, 279, 545, Panel);
-        Button(Control.SettingsExit, 40, 324, 175);
+        Label(Control.UpdateIntervalLabel, 40, 324, 242, 24, Ink, _normal, Panel);
+        AddCombo(Control.UpdateInterval, 288, 318, 322);
+        Button(Control.CheckUpdates, 40, 368, 242);
+        Label(Control.UpdateState, 40, 414, 570, 48, Muted, _small, Panel, wrap: true);
+        Button(Control.SettingsExit, 40, 487, 175);
     }
 
     private void AddShortcutRow(Control field, Control capture, Control clear, int y)
@@ -122,8 +128,9 @@ internal sealed partial class MainWindow
                 break;
             case Page.Pc: Card(146, 369); ShortcutField(256); break;
             case Page.Gamepads: Card(146, 378); ShortcutField(319); break;
-            case Page.Presets: Card(146, 643); ShortcutField(485); break;
-            case Page.Settings: Card(146, 375); break;
+            case Page.Presets: Card(146, 643); ShortcutField(516); break;
+            case Page.Saver: Card(146, 327); Card(337, 500); ShortcutField(440); break;
+            case Page.Settings: Card(146, 469); break;
         }
     }
 
@@ -136,13 +143,19 @@ internal sealed partial class MainWindow
             (Control.PcHeading, "TabPc"), (Control.PcIntro, "PcIntro"), (Control.PcRun, "PcRun"),
             (Control.GamepadHeading, "TabGamepads"), (Control.GamepadIntro, "GamepadIntro"),
             (Control.GamepadRefresh, "Refresh"), (Control.GamepadRun, "GamepadDisconnect"),
+            (Control.UpdateIntervalLabel, "UpdateInterval"), (Control.CheckUpdates, "UpdateCheck"),
             (Control.SettingsHeading, "TabSettings"), (Control.SettingsExit, "MenuExit"));
         SetTips(
             (Control.HdrPick, "HdrPickTip"), (Control.HdrRun, "HdrToggleTip"), (Control.HdrRefresh, "RefreshTip"),
             (Control.PcRun, "PcRunTip"), (Control.GamepadPick, "GamepadPickTip"),
             (Control.GamepadRun, "GamepadRunTip"), (Control.GamepadRefresh, "RefreshTip"),
+            (Control.UpdateInterval, "UpdateIntervalTip"), (Control.CheckUpdates, "UpdateCheckTip"),
             (Control.SettingsExit, "SettingsExitTip"));
+        FillCombo(Control.UpdateInterval, [UiText.Get("UpdateHourly"), UiText.Get("UpdateHalfDay"), UiText.Get("UpdateDaily")],
+            Array.IndexOf(UpdateHours, _settings.UpdateIntervalHours));
+        ShowUpdateStatus(_updateStatus);
         RenderActionShortcuts();
+        RenderSaverLanguage();
         RenderPresetLanguage();
         RenderHdrState();
         RenderGamepadState();
@@ -158,6 +171,7 @@ internal sealed partial class MainWindow
             case Page.Pc: RenderPcState(); break;
             case Page.Gamepads: RefreshGamepads(); break;
             case Page.Settings: RefreshStartup(); break;
+            case Page.Saver: RefreshSaver(); break;
         }
     }
 
@@ -174,6 +188,13 @@ internal sealed partial class MainWindow
         var handle = _controls[Control.Status];
         _colors[handle] = (Control.Status, error ? Error : Accent, Background);
         Text(Control.Status, message);
+    }
+
+    internal void ShowUpdateStatus(UpdateStatus status)
+    {
+        _updateStatus = status;
+        ShowNotice(Control.UpdateState, status.Key is null ? null : new(status.Key, status.Error, status.Version));
+        EnableWindow(_controls[Control.CheckUpdates], !status.Busy);
     }
 
     private void RenderPcState()
@@ -262,6 +283,18 @@ internal sealed partial class MainWindow
     {
         if (PresetCommand(id, notification))
             return true;
+        if (id == Control.UpdateInterval && notification == 1)
+        {
+            int index = ComboIndex(id);
+            if (index >= 0 && index < UpdateHours.Length)
+                Save(_settings with { UpdateIntervalHours = UpdateHours[index] });
+            return true;
+        }
+        if (id == Control.SaverTime && notification == 0x0300)
+        {
+            EnableWindow(_controls[Control.SaverApply], SaverTimeEdited);
+            return true;
+        }
         if (notification == 1 && id is Control.HdrPick or Control.GamepadPick)
         {
             int index = ComboIndex(id);
@@ -279,13 +312,19 @@ internal sealed partial class MainWindow
         }
         if (notification != 0)
             return false;
-        if (id is >= Control.TabDisplays and <= Control.TabSettings)
+        if (id is >= Control.TabDisplays and <= Control.TabSaver)
         {
             ShowPage((Page)(id - Control.TabDisplays));
             return true;
         }
         switch (id)
         {
+            case Control.CheckUpdates: _checkUpdates(); return true;
+            case Control.SaverEnabled: ApplySaverEnabled(); return true;
+            case Control.SaverApply: ApplySaverTimeout(); return true;
+            case Control.BlackRun: _execute(new(CommandTarget.BlackScreen), false); return true;
+            case Control.BlackCapture: BeginCapture(CommandTarget.BlackScreen); return true;
+            case Control.BlackClear: Save(_settings.SetShortcut(CommandTarget.BlackScreen, null)); return true;
             case Control.SettingsExit:
                 if (MessageBox(Handle, UiText.Get(_presetDirty ? "SettingsConfirmExitDraft" : "SettingsConfirmExit"),
                     App.Name, 0x124) == 6)
@@ -368,6 +407,7 @@ internal sealed partial class MainWindow
     private void RenderActionShortcuts()
     {
         RenderRow(CommandTarget.Hdr, _settings.HdrShortcut, Control.HdrKey, Control.HdrCapture, Control.HdrClear);
+        RenderRow(CommandTarget.BlackScreen, _settings.BlackScreenShortcut, Control.BlackKey, Control.BlackCapture, Control.BlackClear);
         RenderRow(CommandTarget.Sleep, _settings.SleepShortcut, Control.PcKey, Control.PcCapture, Control.PcClear);
         RenderRow(CommandTarget.Gamepads, _settings.GamepadShortcut, Control.GamepadKey, Control.GamepadCapture, Control.GamepadClear);
         RenderRow(CommandTarget.Preset, _draftShortcut, Control.PresetKey, Control.PresetCapture, Control.PresetClear);
