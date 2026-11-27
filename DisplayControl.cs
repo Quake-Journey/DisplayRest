@@ -15,7 +15,7 @@ internal sealed class DisplayControl : IDisposable
     private const int RunAction = AppMessage + 1;
     private const int StopThread = AppMessage + 2;
     private const int WakeDisplays = AppMessage + 3;
-    private const int SleepAgain = AppMessage + 4;
+    private const int RecheckWakeTimer = 3;
     private readonly Action<Action> _postToUi;
     private readonly ConcurrentQueue<Action> _actions = new();
     private readonly Thread _thread;
@@ -38,7 +38,8 @@ internal sealed class DisplayControl : IDisposable
     private long _offRequestedUntil;
     private long _ignoreWakeUntil;
     private long _ignoreToggleUntil;
-    private long _blockedWakeUntil;
+    private bool _wakeRecheckPending;
+    private long _wakeRequestedUntil;
     private long _lastPause;
     private bool _wakeQueued;
 
@@ -177,11 +178,17 @@ internal sealed class DisplayControl : IDisposable
                 PostQuitMessage(0);
                 return 0;
             case WakeDisplays:
-                Wake();
+                if (_wakeQueued)
+                    Wake();
                 return 0;
-            case SleepAgain:
-                if (_off && !_wakeQueued)
-                    SetDisplays(_window, on: false);
+            case TimerMessage when wParam == RecheckWakeTimer:
+                if (_wakeRecheckPending)
+                    RecheckWake();
+                return 0;
+            case PowerBroadcast when wParam is 0x04 or 0x06 or 0x07 or 0x12: // Suspend or resume.
+                CancelSleep();
+                AcceptDisplayOn();
+                _wakeQueued = false;
                 return 0;
             case TimerMessage when wParam == 1:
                 if (_sleepPending)
@@ -203,22 +210,59 @@ internal sealed class DisplayControl : IDisposable
             return null;
 
         int state = Marshal.ReadInt32(lParam, 20);
-        if (state == 1 && _off && Environment.TickCount64 < _blockedWakeUntil)
+        if (state == 0 && Environment.TickCount64 >= _wakeRequestedUntil)
         {
-            // Windows or the video driver may react before a blocked input reaches the hook.
-            _blockedWakeUntil = 0;
-            PostMessage(_window, SleepAgain);
-            return 0;
-        }
-        if (state is 0 or 1)
-        {
+            CancelWakeRecheck();
             _offRequestedUntil = 0;
-            SetOffState(state == 0);
+            SetOffState(true);
+        }
+        else if (state == 1)
+        {
+            // The power notification has no input source and can precede or follow the hook.
+            if (ShouldKeepDisplaysOff())
+            {
+                if (!_wakeRecheckPending)
+                {
+                    _wakeRecheckPending = SetTimer(_window, RecheckWakeTimer, 120) != 0;
+                    if (!_wakeRecheckPending)
+                        RecheckWake();
+                }
+            }
+            else
+                AcceptDisplayOn();
         }
         return 0;
     }
 
     private bool IsOff => _off || Environment.TickCount64 < _offRequestedUntil;
+
+    private bool ShouldKeepDisplaysOff() => IsOff && !_wakeQueued &&
+        (!_settings.WakeByKeyboard || !_settings.WakeByMouse || Environment.TickCount64 < _ignoreWakeUntil);
+
+    private void RecheckWake()
+    {
+        CancelWakeRecheck();
+        // Leave the lock screen and other desktops where our input hooks cannot run to Windows.
+        if (ShouldKeepDisplaysOff() && IsInputDesktop())
+            SetDisplays(_window, on: false);
+        else
+            AcceptDisplayOn();
+    }
+
+    private void CancelWakeRecheck()
+    {
+        if (_wakeRecheckPending)
+            KillTimer(_window, RecheckWakeTimer);
+        _wakeRecheckPending = false;
+    }
+
+    private void AcceptDisplayOn()
+    {
+        CancelWakeRecheck();
+        _offRequestedUntil = 0;
+        _wakeRequestedUntil = 0;
+        SetOffState(false);
+    }
 
     private void ToggleDisplays(bool fromKeyboard)
     {
@@ -250,6 +294,7 @@ internal sealed class DisplayControl : IDisposable
             return;
 
         var now = Environment.TickCount64;
+        _wakeRequestedUntil = 0;
         _offRequestedUntil = now + 2200;
         _ignoreWakeUntil = now + 260;
         SetDisplays(_window, on: false);
@@ -259,10 +304,11 @@ internal sealed class DisplayControl : IDisposable
     {
         _wakeQueued = false;
         CancelSleep();
-        _offRequestedUntil = 0;
-        _blockedWakeUntil = 0;
-        _ignoreToggleUntil = Environment.TickCount64 + 700;
-        SetOffState(false);
+        AcceptDisplayOn();
+        var now = Environment.TickCount64;
+        // An earlier asynchronous Off acknowledgement can cross an explicit wake.
+        _wakeRequestedUntil = now + 2200;
+        _ignoreToggleUntil = now + 700;
         SetDisplays(_window, on: true);
     }
 
@@ -466,8 +512,6 @@ internal sealed class DisplayControl : IDisposable
     {
         if (enabled && now >= _ignoreWakeUntil)
             QueueWake();
-        else
-            _blockedWakeUntil = now + 450;
     }
 
     private static int ButtonId(int message, nint data) =>

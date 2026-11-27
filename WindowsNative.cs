@@ -41,6 +41,18 @@ internal static partial class WindowsNative
     [DllImport("user32.dll")]
     internal static extern short GetAsyncKeyState(int key);
 
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern nint GetThreadDesktop(uint threadId);
+
+    [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW")]
+    private static extern bool GetUserObjectInformation(nint handle, int index, out int value, uint size, out uint needed);
+
+    internal static bool IsInputDesktop() =>
+        GetUserObjectInformation(GetThreadDesktop(GetCurrentThreadId()), 6 /* UOI_IO */, out int active, sizeof(int), out _) && active != 0;
+
     [DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
     internal static extern nint DefWindowProc(nint window, int message, nint wParam, nint lParam);
 
